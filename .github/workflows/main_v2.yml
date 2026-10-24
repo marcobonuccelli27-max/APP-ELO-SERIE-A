@@ -34,6 +34,17 @@ jobs:
           sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <application#' android/app/src/main/AndroidManifest.xml
           sed -i 's#android:label="elo_serie_a"#android:label="Elo Serie A"#' android/app/src/main/AndroidManifest.xml
           rm -rf test
+          cat > android/app/proguard-rules.pro << 'REGOLE'
+          -dontwarn com.google.mlkit.vision.text.chinese.**
+          -dontwarn com.google.mlkit.vision.text.devanagari.**
+          -dontwarn com.google.mlkit.vision.text.japanese.**
+          -dontwarn com.google.mlkit.vision.text.korean.**
+          REGOLE
+
+      - name: Usa sempre la stessa firma
+        run: |
+          mkdir -p ~/.android
+          cp debug.keystore ~/.android/debug.keystore
 
       - name: Scarica le librerie
         run: flutter pub get
