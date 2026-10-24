@@ -46,6 +46,29 @@ class DcFit {
     final mu = g * (att[away] ?? promotedAtt) * (def[home] ?? promotedDef);
     return scoreProbs(lam, mu, rho);
   }
+
+  /// Probabilità di ogni risultato esatto: [gol casa][gol ospite], da 0 a 10.
+  List<List<double>> scoreMatrix(String home, String away) {
+    final lam = g * h * (att[home] ?? promotedAtt) * (def[away] ?? promotedDef);
+    final mu = g * (att[away] ?? promotedAtt) * (def[home] ?? promotedDef);
+    const n = 10;
+    final ph = _poisson(lam, n), pa = _poisson(mu, n);
+    final m = List.generate(n + 1, (_) => List<double>.filled(n + 1, 0));
+    var tot = 0.0;
+    for (var x = 0; x <= n; x++) {
+      for (var y = 0; y <= n; y++) {
+        final v = math.max(_tau(x, y, lam, mu, rho), 1e-6) * ph[x] * pa[y];
+        m[x][y] = v;
+        tot += v;
+      }
+    }
+    for (final row in m) {
+      for (var y = 0; y <= n; y++) {
+        row[y] /= tot;
+      }
+    }
+    return m;
+  }
 }
 
 double _tau(int x, int y, double lam, double mu, double rho) {
@@ -341,8 +364,10 @@ double calibrateDc(List<MatchResult> ms, {int from = 0, int to = 1 << 30}) {
 }
 
 /// Modello stimato con tutte le partite, pronto per le prossime.
-DcFit fitDcNow(List<MatchResult> ms, double halfLife, {int? untilSeason}) {
-  final sub = untilSeason == null ? ms : ms.where((m) => m.season <= untilSeason).toList();
+DcFit fitDcNow(List<MatchResult> ms, double halfLife, {int? untilSeason, DateTime? before}) {
+  final sub = ms
+      .where((m) => (untilSeason == null || m.season <= untilSeason) && (before == null || m.date.isBefore(before)))
+      .toList();
   final d = DcData(sub);
   final refDay = d.n == 0 ? 0 : d.day[d.n - 1] + 1;
   final f = _fit(d, d.n, refDay, halfLife);

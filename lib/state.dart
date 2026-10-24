@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'data.dart';
 import 'dc.dart';
 import 'elo.dart';
+import 'slip.dart';
 
 class Settings {
   String provider; // 'fd' = football-data.co.uk, 'oddsapi' = The Odds API
@@ -492,6 +493,94 @@ class AppState extends ChangeNotifier {
     return loaded;
   }
 
+  /// Tutte le squadre presenti nei dati.
+  List<String> get knownTeams {
+    final h = _history;
+    if (h == null) return [];
+    final set = <String>{};
+    for (final m in h) {
+      set.add(m.home);
+      set.add(m.away);
+    }
+    return set.toList()..sort();
+  }
+
+  /// Squadre delle ultime tre stagioni, per scegliere a mano una partita.
+  List<String> get recentTeams {
+    final h = _history;
+    if (h == null || h.isEmpty) return [];
+    final last = h.last.season;
+    final set = <String>{};
+    for (final m in h) {
+      if (m.season < last - 2) continue;
+      set.add(m.home);
+      set.add(m.away);
+    }
+    return set.toList()..sort();
+  }
+
+  Future<void> ensureHistoryLoaded() async {
+    await _ensureHistory();
+    notifyListeners();
+  }
+
+  /// Valuta una schedina con Dixon-Coles, usando solo le partite giocate
+  /// prima del giorno della prima giocata.
+  Future<SlipAnalysis> analyzeSlip(List<Leg> legs, double stake, double bonus) async {
+    final h = await _ensureHistory();
+    DateTime? first;
+    for (final l in legs) {
+      final d = l.date;
+      if (d != null && (first == null || d.isBefore(first))) first = d;
+    }
+    final before = first == null ? null : DateTime(first.year, first.month, first.day);
+    final fit = await _fitDcSlipInBackground(h, halfLifeInUse, before);
+    final out = <LegResult>[];
+    for (final leg in legs) {
+      if (leg.home.isEmpty || leg.away.isEmpty || leg.home == leg.away) {
+        out.add(LegResult(leg, null, null, null, null));
+        continue;
+      }
+      final m = fit.scoreMatrix(leg.home, leg.away);
+      var p = 0.0, p1 = 0.0, px = 0.0, p2 = 0.0;
+      for (var x = 0; x < m.length; x++) {
+        for (var y = 0; y < m[x].length; y++) {
+          final v = m[x][y];
+          if (leg.wins(x, y)) p += v;
+          if (x > y) {
+            p1 += v;
+          } else if (x == y) {
+            px += v;
+          } else {
+            p2 += v;
+          }
+        }
+      }
+      String? score;
+      bool? won;
+      final d = leg.date;
+      if (d != null) {
+        for (final r in h) {
+          if (r.home == leg.home && r.away == leg.away && r.date.difference(d).inHours.abs() <= 72) {
+            score = '${r.hg}-${r.ag}';
+            won = leg.wins(r.hg, r.ag);
+            break;
+          }
+        }
+      }
+      out.add(LegResult(leg, p, [p1, px, p2], score, won));
+    }
+    final unknown = legs.where((l) => l.home.isNotEmpty && (!fit.knows(l.home) || !fit.knows(l.away))).length;
+    var note = before == null
+        ? 'Stima Dixon-Coles con tutte le partite giocate finora'
+        : 'Stima Dixon-Coles con le sole partite giocate prima del ${before.day}/${before.month}/${before.year}';
+    note += ' (emivita ${halfLifeInUse.round()} giorni). Le giocate sono trattate come indipendenti.';
+    if (unknown > 0) {
+      note += ' Per $unknown partite una squadra non ha dati recenti in Serie A: è stimata come una neopromossa.';
+    }
+    return SlipAnalysis(out, stake, bonus, note);
+  }
+
   Future<BacktestResult> runBacktest(int seasons, double threshold, String model) async {
     final h = await _ensureHistory();
     final args = BacktestArgs(
@@ -561,6 +650,9 @@ Future<double> _calibrateDcInBackground(List<MatchResult> h, int from, int to) =
 
 Future<DcFit> _fitDcInBackground(List<MatchResult> h, double hl, int? untilSeason) =>
     Isolate.run(() => fitDcNow(h, hl, untilSeason: untilSeason));
+
+Future<DcFit> _fitDcSlipInBackground(List<MatchResult> h, double hl, DateTime? before) =>
+    Isolate.run(() => fitDcNow(h, hl, before: before));
 
 Future<EloHistoryData> _historyInBackground(List<MatchResult> h, EloParams p) =>
     Isolate.run(() => buildHistory(h, p));

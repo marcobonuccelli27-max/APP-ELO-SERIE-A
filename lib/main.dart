@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'screens.dart';
+import 'slip_screen.dart';
 import 'state.dart';
 import 'widgets.dart';
 
@@ -61,6 +62,7 @@ class _ShellState extends State<Shell> {
   static const _screens = [
     GiornataScreen(),
     ClassificaScreen(),
+    SchedinaScreen(),
     VerificaScreen(),
     ImpostazioniScreen(),
   ];
@@ -79,6 +81,7 @@ class _ShellState extends State<Shell> {
         items: const [
           BottomNavigationBarItem(icon: Icon(CupertinoIcons.calendar), label: 'Giornata'),
           BottomNavigationBarItem(icon: Icon(CupertinoIcons.chart_bar), label: 'Classifica'),
+          BottomNavigationBarItem(icon: Icon(CupertinoIcons.camera), label: 'Schedina'),
           BottomNavigationBarItem(icon: Icon(CupertinoIcons.arrow_counterclockwise), label: 'Verifica'),
           BottomNavigationBarItem(icon: Icon(CupertinoIcons.gear), label: 'Impostazioni'),
         ],
