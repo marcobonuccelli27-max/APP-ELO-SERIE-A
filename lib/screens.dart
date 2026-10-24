@@ -53,6 +53,9 @@ class _GiornataScreenState extends State<GiornataScreen> {
                 ? 'Serie A · nessun aggiornamento'
                 : 'Aggiornato ${dateLabel(app.lastUpdate)}',
           ),
+          if (!s.introSeen) _IntroCard(app: app),
+          if (s.introSeen && app.checkSettings().any((a) => a.level == AdviceLevel.warning))
+            _AdviceBanner(onTap: () => app.goToTab(4)),
           const SizedBox(height: 18),
           PrimaryButton(
             label: app.busy ? 'Aggiorno…' : 'Aggiorna dati',
@@ -167,6 +170,129 @@ class _QuotaLine extends StatelessWidget {
           'Il conteggio riparte all’inizio di ogni mese$when.',
           style: const TextStyle(fontSize: 12, height: 1.4, color: C.grey),
         ),
+      ]),
+    );
+  }
+}
+
+/// Scheda di benvenuto: come usare correttamente l'app.
+class _IntroCard extends StatelessWidget {
+  final AppState app;
+  const _IntroCard({required this.app});
+
+  @override
+  Widget build(BuildContext context) {
+    Widget point(String n, String t) => Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Container(
+              width: 22,
+              height: 22,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(color: C.blue, borderRadius: BorderRadius.circular(11)),
+              child: Text(n, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: C.white)),
+            ),
+            const SizedBox(width: 10),
+            Expanded(child: Text(t, style: const TextStyle(fontSize: 13.5, height: 1.45, color: C.ink2))),
+          ]),
+        );
+    return Container(
+      margin: const EdgeInsets.only(top: 16),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(color: C.blueTint, borderRadius: BorderRadius.circular(16)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text('Come usare questa app',
+            style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: C.ink)),
+        point('1', 'Stima le probabilità delle partite e le confronta con le quote. Sono stime, non certezze.'),
+        point('2', 'Segnala solo le giocate con un piccolo vantaggio stimato. Sono poche, e spesso perdono lo stesso.'),
+        point('3', 'Prima di fidarti, guarda la Verifica sul passato: ti dice se il modello avrebbe guadagnato davvero.'),
+        point('4', 'Giocate singole, puntata fissa piccola, solo cifre che consideri una spesa per divertimento.'),
+        const SizedBox(height: 14),
+        PrimaryButton(
+          label: 'Applica le impostazioni consigliate',
+          icon: CupertinoIcons.checkmark_alt,
+          onPressed: () async {
+            await app.applyRecommended();
+            if (!app.busy) app.refresh();
+          },
+        ),
+        Center(
+          child: CupertinoButton(
+            onPressed: () {
+              app.settings.introSeen = true;
+              app.saveSettings();
+            },
+            child: const Text('Ho capito, scelgo io', style: TextStyle(fontSize: 15)),
+          ),
+        ),
+      ]),
+    );
+  }
+}
+
+class _AdviceBanner extends StatelessWidget {
+  final VoidCallback onTap;
+  const _AdviceBanner({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 14),
+      child: Material(
+        color: C.warnTint,
+        borderRadius: BorderRadius.circular(14),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(14),
+          onTap: onTap,
+          child: const Padding(
+            padding: EdgeInsets.all(14),
+            child: Row(children: [
+              Icon(CupertinoIcons.exclamationmark_circle, size: 20, color: C.warn),
+              SizedBox(width: 10),
+              Expanded(
+                child: Text('Alcune impostazioni possono darti indicazioni fuorvianti.',
+                    style: TextStyle(fontSize: 13.5, height: 1.4, color: C.ink2)),
+              ),
+              Text('Rivedi', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: C.blue)),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Un consiglio con il pulsante per applicarlo.
+class _AdviceCard extends StatelessWidget {
+  final Advice a;
+  const _AdviceCard(this.a);
+
+  @override
+  Widget build(BuildContext context) {
+    final warn = a.level == AdviceLevel.warning;
+    return Container(
+      margin: const EdgeInsets.only(top: 10),
+      padding: const EdgeInsets.fromLTRB(14, 12, 8, 12),
+      decoration: BoxDecoration(color: warn ? C.warnTint : C.fill, borderRadius: BorderRadius.circular(14)),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Icon(warn ? CupertinoIcons.exclamationmark_circle : CupertinoIcons.lightbulb,
+            size: 20, color: warn ? C.warn : C.blueText),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(a.title, style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w600, color: C.ink)),
+            const SizedBox(height: 2),
+            Text(a.text, style: const TextStyle(fontSize: 13, height: 1.4, color: C.ink2)),
+          ]),
+        ),
+        if (a.action != null)
+          CupertinoButton(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            minSize: 32,
+            onPressed: a.action,
+            child: Text(a.actionLabel ?? 'Correggi',
+                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+          ),
       ]),
     );
   }
@@ -1004,6 +1130,7 @@ class _VerificaScreenState extends State<VerificaScreen> {
         result = r;
         error = r.error;
       });
+      await app.recordTest(r, seasons);
     } catch (e) {
       if (mounted) setState(() => error = e.toString());
     } finally {
@@ -1197,6 +1324,7 @@ class _VerificaScreenState extends State<VerificaScreen> {
         ]),
       ),
       Notice(verdict.$2, title: verdict.$1, tone: verdict.$3),
+      ..._nextSteps(app, r),
       if (r.buckets.isNotEmpty) _ValueBands(r: r),
       if (r.sweep.isNotEmpty)
         _BestThresholds(
@@ -1250,6 +1378,69 @@ class _VerificaScreenState extends State<VerificaScreen> {
                 'del bookmaker, prevede peggio delle quote.',
           ),
         ],
+      ),
+    ];
+  }
+
+  /// Il passo successivo consigliato, in base al risultato.
+  List<Widget> _nextSteps(AppState app, BacktestResult r) {
+    final steps = <Advice>[];
+    void rerun(void Function() change) {
+      setState(change);
+      _run(app);
+    }
+
+    if (r.bets < 30 && seasons < 5) {
+      steps.add(Advice('Troppe poche giocate', 'Con più stagioni il risultato dipende meno dalla fortuna.',
+          AdviceLevel.tip, 'Prova 5 stagioni', () => rerun(() => seasons = 5)));
+    }
+    if (r.modelLogLoss > r.bookLogLoss && r.marketWeight == 0) {
+      steps.add(Advice(
+        'Il bookmaker prevede meglio',
+        'Mescolando il modello con il mercato i valori esagerati si ridimensionano. Guarda se l’errore scende.',
+        AdviceLevel.tip,
+        'Prova peso 50%',
+        () => rerun(() => weightPct = 50),
+      ));
+    }
+    if (r.model == 'elo' && !app.modelTested('dc') && r.marketWeight == 0) {
+      steps.add(Advice('Confronta con Dixon-Coles', 'Stesse stagioni, altro modello: vince quello con l’errore più basso.',
+          AdviceLevel.tip, 'Prova Dixon-Coles', () => rerun(() => model = 'dc')));
+    } else if (r.model == 'dc' && !app.modelTested('elo') && r.marketWeight == 0) {
+      steps.add(Advice('Confronta con Elo', 'Stesse stagioni, altro modello: vince quello con l’errore più basso.',
+          AdviceLevel.tip, 'Prova Elo', () => rerun(() => model = 'elo')));
+    }
+    ThresholdRow? prudent;
+    for (final row in r.sweep) {
+      if (row.bets < 30) continue;
+      if (prudent == null || row.lowerBound > prudent.lowerBound) prudent = row;
+    }
+    final cur = thr ?? app.settings.threshold;
+    if (prudent != null && (prudent.threshold - cur).abs() > 0.001) {
+      final t = prudent.threshold;
+      steps.add(Advice(
+        'Soglia più prudente: ${fmt(t)}',
+        'È quella che regge meglio anche nel caso sfavorevole. Ricontrollala poi su un altro numero di stagioni.',
+        AdviceLevel.tip,
+        'Usa ${fmt(t)}',
+        () {
+          app.settings.threshold = t;
+          app.saveSettings();
+          rerun(() => thr = t);
+        },
+      ));
+    }
+    return [
+      const SizedBox(height: 22),
+      const Text('Cosa fare adesso', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: C.ink)),
+      for (final a in steps) _AdviceCard(a),
+      Notice(
+        r.roi - r.roiMargin > 0
+            ? 'Il risultato è positivo anche nel caso sfavorevole: ricontrollalo su altre stagioni prima di fidarti, '
+                'e continua con puntate piccole e fisse.'
+            : 'Se nessuna combinazione guadagna, il modello funziona come ci si aspetta: le quote sono difficili da battere. '
+                'Usa l’app per scartare le giocate peggiori e scegliere le singole più ragionevoli, non per guadagnare in modo sistematico.',
+        title: 'Come usare questo risultato',
       ),
     ];
   }
@@ -1575,6 +1766,7 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
     final p = app.paramsInUse;
     final books = app.booksSeen.toList()..sort();
     final calibSeasons = [for (var y = app.currentSeason - 1; y >= firstSeason; y--) y];
+    final advice = app.checkSettings();
 
     void save() => app.saveSettings();
 
@@ -1584,6 +1776,30 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
         padding: _pagePadding,
         children: [
           const PageHeader(title: 'Impostazioni'),
+          const SizedBox(height: 18),
+          const Text('Controllo delle impostazioni',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: C.grey)),
+          if (advice.isEmpty)
+            const Notice(
+              'Le tue impostazioni sono quelle consigliate per un uso corretto. Puoi cambiarle, ma qui sotto '
+              'trovi sempre l’indicazione del valore consigliato.',
+              title: 'Tutto a posto',
+              tone: Tone.positive,
+            )
+          else ...[
+            for (final a in advice) _AdviceCard(a),
+            const SizedBox(height: 12),
+            PrimaryButton(
+              label: 'Applica tutte le impostazioni consigliate',
+              icon: CupertinoIcons.checkmark_alt,
+              onPressed: () {
+                app.applyRecommended();
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                  content: Text('Impostazioni consigliate applicate. Premi “Aggiorna dati” per ricalcolare.'),
+                ));
+              },
+            ),
+          ],
           Group(
             title: 'Fonte delle quote',
             footer: s.provider == 'fd'
@@ -1675,7 +1891,7 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
               ),
               SettingRow(
                 label: 'Puntata per giocata',
-                sub: euro(s.stake),
+                sub: '${euro(s.stake)} · consigliato 1–2%',
                 trailing: CupertinoSlidingSegmentedControl<int>(
                   groupValue: s.stakePct.round(),
                   backgroundColor: C.fill2,
@@ -1751,6 +1967,7 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
               ),
               _SeasonRow(
                 label: 'Calibra dalla stagione',
+                sub: 'Consigliato dal ${seasonLabel(Recommended.calibFrom)}',
                 value: seasonLabel(s.calibFrom),
                 onTap: () async {
                   final picked = await pickSeason(context, calibSeasons, s.calibFrom);
@@ -1865,9 +2082,8 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
                 ),
               SettingRow(
                 label: 'Peso del mercato',
-                sub: s.marketWeight == 0
-                    ? 'Solo il modello'
-                    : 'Probabilità: ${fmt((1 - s.marketWeight) * 100, 0)}% modello, ${fmt(s.marketWeight * 100, 0)}% quote',
+                sub: '${s.marketWeight == 0 ? 'Solo il modello' : 'Probabilità: ${fmt((1 - s.marketWeight) * 100, 0)}% modello, ${fmt(s.marketWeight * 100, 0)}% quote'}'
+                    ' · consigliato 50%',
                 trailing: CupertinoSlidingSegmentedControl<int>(
                   groupValue: const [0, 25, 50, 75].contains((s.marketWeight * 100).round())
                       ? (s.marketWeight * 100).round()
@@ -1928,9 +2144,10 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
 
 class _SeasonRow extends StatelessWidget {
   final String label;
+  final String? sub;
   final String value;
   final VoidCallback onTap;
-  const _SeasonRow({required this.label, required this.value, required this.onTap});
+  const _SeasonRow({required this.label, this.sub, required this.value, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -1938,6 +2155,7 @@ class _SeasonRow extends StatelessWidget {
       onTap: onTap,
       child: SettingRow(
         label: label,
+        sub: sub,
         trailing: Row(mainAxisSize: MainAxisSize.min, children: [
           Text(value, style: const TextStyle(fontSize: 15, color: C.blue)),
           const SizedBox(width: 4),

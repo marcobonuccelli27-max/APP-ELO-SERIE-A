@@ -29,8 +29,12 @@ class Settings {
   double marketWeight; // peso delle quote nelle probabilità: 0 = solo modello
   double dcHalfLife; // emivita manuale per Dixon-Coles, in giorni
   Set<String> excludedBooks;
+  bool introSeen; // scheda di benvenuto già vista
+  Map<String, double> testedLl; // errore delle verifiche: "modello@stagioni" -> log loss
 
   Settings({
+    this.introSeen = false,
+    Map<String, double>? testedLl,
     this.provider = 'fd',
     this.apiKey = '',
     this.budget = 200,
@@ -48,7 +52,8 @@ class Settings {
     this.marketWeight = 0,
     this.dcHalfLife = dcDefaultHalfLife,
     Set<String>? excludedBooks,
-  }) : excludedBooks = excludedBooks ?? {'Pinnacle', '1xBet', 'Matchbook'};
+  })  : excludedBooks = excludedBooks ?? {'Pinnacle', '1xBet', 'Matchbook'},
+        testedLl = testedLl ?? {};
 
   double get stake => budget * stakePct / 100;
 
@@ -75,6 +80,8 @@ class Settings {
         'marketWeight': marketWeight,
         'dcHalfLife': dcHalfLife,
         'excludedBooks': excludedBooks.toList(),
+        'introSeen': introSeen,
+        'testedLl': testedLl,
       };
 
   factory Settings.fromJson(Map<String, dynamic> j) {
@@ -97,8 +104,32 @@ class Settings {
       marketWeight: n('marketWeight', 0),
       dcHalfLife: n('dcHalfLife', dcDefaultHalfLife),
       excludedBooks: (j['excludedBooks'] as List<dynamic>?)?.map((e) => e as String).toSet(),
+      introSeen: j['introSeen'] as bool? ?? false,
+      testedLl: (j['testedLl'] as Map<String, dynamic>?)?.map((k, v) => MapEntry(k, (v as num).toDouble())),
     );
   }
+}
+
+/// Valori consigliati per un uso corretto dell'app.
+class Recommended {
+  static const calibFrom = 2012;
+  static const model = 'dc';
+  static const marketWeight = 0.5;
+  static const threshold = 1.05;
+  static const stakePct = 2.0;
+  static const nonAdm = ['Pinnacle', '1xBet', 'Matchbook'];
+}
+
+enum AdviceLevel { warning, tip }
+
+/// Un consiglio sulle impostazioni, con l'eventuale correzione.
+class Advice {
+  final String title;
+  final String text;
+  final AdviceLevel level;
+  final String? actionLabel;
+  final void Function()? action;
+  Advice(this.title, this.text, this.level, [this.actionLabel, this.action]);
 }
 
 class BestOdds {
@@ -322,6 +353,196 @@ class AppState extends ChangeNotifier {
   final Map<int, Future<SeasonView>> _views = {};
 
   int get currentSeason => currentSeasonStart(DateTime.now());
+
+  /// Schermata aperta nella barra in basso.
+  int tab = 0;
+
+  void goToTab(int i) {
+    tab = i;
+    notifyListeners();
+  }
+
+  /// Applica tutte le impostazioni consigliate.
+  Future<void> applyRecommended() async {
+    final s = settings;
+    s.autoCalib = true;
+    s.calibFrom = Recommended.calibFrom;
+    s.calibTo = 0;
+    s.model = _betterModel() ?? Recommended.model;
+    s.marketWeight = Recommended.marketWeight;
+    s.threshold = Recommended.threshold;
+    s.stakePct = Recommended.stakePct;
+    s.excludedBooks.addAll(Recommended.nonAdm);
+    s.introSeen = true;
+    await saveSettings();
+  }
+
+  /// Il modello che ha avuto l'errore più basso nelle verifiche fatte
+  /// sulle stesse stagioni, se ce ne sono per entrambi.
+  String? _betterModel() {
+    final t = settings.testedLl;
+    for (final n in [3, 5, 1]) {
+      final e = t['elo@$n'], d = t['dc@$n'];
+      if (e != null && d != null) return d <= e ? 'dc' : 'elo';
+    }
+    return null;
+  }
+
+  /// Ricorda l'errore di una verifica fatta con il solo modello.
+  Future<void> recordTest(BacktestResult r, int seasons) async {
+    if (r.error != null || r.marketWeight > 0) return;
+    settings.testedLl['${r.model}@$seasons'] = r.modelLogLoss;
+    await saveSettings();
+  }
+
+  bool modelTested(String model) => settings.testedLl.keys.any((k) => k.startsWith('$model@'));
+
+  /// Controllo delle impostazioni: cosa si discosta da un uso corretto.
+  List<Advice> checkSettings() {
+    final s = settings;
+    final out = <Advice>[];
+    final cur = currentSeason;
+    if (!s.autoCalib) {
+      out.add(Advice(
+        'Calibrazione manuale',
+        'Stai usando valori scelti a mano. La calibrazione automatica prova migliaia di combinazioni '
+            'sui dati e quasi sempre prevede meglio.',
+        AdviceLevel.warning,
+        'Attiva',
+        () {
+          s.autoCalib = true;
+          saveSettings();
+        },
+      ));
+    }
+    final to = s.calibToFor(cur);
+    if (to - s.calibFrom + 1 < 4) {
+      out.add(Advice(
+        'Poche stagioni di calibrazione',
+        'Con meno di 4 stagioni i parametri dipendono troppo dal caso.',
+        AdviceLevel.warning,
+        'Dal ${seasonLabel(Recommended.calibFrom)}',
+        () {
+          s.calibFrom = Recommended.calibFrom;
+          s.calibTo = 0;
+          saveSettings();
+        },
+      ));
+    } else if (s.calibFrom < 2010) {
+      out.add(Advice(
+        'Stagioni molto vecchie',
+        'Il calcio di 15–20 anni fa era diverso: meglio calibrare dal ${seasonLabel(Recommended.calibFrom)}.',
+        AdviceLevel.tip,
+        'Correggi',
+        () {
+          s.calibFrom = Recommended.calibFrom;
+          saveSettings();
+        },
+      ));
+    }
+    if (s.marketWeight == 0) {
+      out.add(Advice(
+        'Solo il modello',
+        'Senza peso del mercato i valori molto alti, che spesso sono errori del modello, restano tali. '
+            'Con il 50% si ridimensionano da soli.',
+        AdviceLevel.tip,
+        'Usa 50%',
+        () {
+          s.marketWeight = Recommended.marketWeight;
+          saveSettings();
+        },
+      ));
+    } else if (s.marketWeight >= 0.75) {
+      out.add(Advice(
+        'Il modello conta poco',
+        'Con il 75% di mercato le probabilità sono quasi quelle delle quote: l’app troverà pochissimo valore.',
+        AdviceLevel.tip,
+        'Usa 50%',
+        () {
+          s.marketWeight = Recommended.marketWeight;
+          saveSettings();
+        },
+      ));
+    }
+    if (s.threshold < 1.03) {
+      out.add(Advice(
+        'Soglia troppo bassa',
+        'Sotto 1,03 il vantaggio stimato è così piccolo che è solo rumore: perderesti il margine del bookmaker.',
+        AdviceLevel.warning,
+        'Usa 1,05',
+        () {
+          s.threshold = Recommended.threshold;
+          saveSettings();
+        },
+      ));
+    } else if (s.threshold > 1.12) {
+      out.add(Advice(
+        'Soglia molto alta',
+        'Sopra 1,12 restano poche giocate, e spesso sono quelle dove il modello sbaglia di più.',
+        AdviceLevel.tip,
+        'Usa 1,05',
+        () {
+          s.threshold = Recommended.threshold;
+          saveSettings();
+        },
+      ));
+    }
+    if (s.stakePct > 2) {
+      out.add(Advice(
+        'Puntata alta',
+        'Con il 3% del budget a giocata, una serie negativa normale può dimezzare il budget.',
+        AdviceLevel.tip,
+        'Usa 2%',
+        () {
+          s.stakePct = Recommended.stakePct;
+          saveSettings();
+        },
+      ));
+    }
+    final active = Recommended.nonAdm.where((b) => booksSeen.contains(b) && !s.excludedBooks.contains(b)).toList();
+    if (active.isNotEmpty) {
+      out.add(Advice(
+        'Bookmaker non giocabili in Italia',
+        '${active.join(', ')} non ha licenza ADM: le sue quote fanno sembrare convenienti giocate che non puoi fare.',
+        AdviceLevel.warning,
+        'Escludi',
+        () {
+          s.excludedBooks.addAll(Recommended.nonAdm);
+          saveSettings();
+        },
+      ));
+    }
+    if (s.provider == 'oddsapi' && s.apiKey.trim().isEmpty) {
+      out.add(Advice('Manca la chiave API', 'Senza chiave The Odds API non scarica le quote.', AdviceLevel.warning,
+          'Usa football-data', () {
+        s.provider = 'fd';
+        saveSettings();
+      }));
+    }
+    final better = _betterModel();
+    if (better != null && better != s.model) {
+      out.add(Advice(
+        'C’è un modello migliore',
+        'Nelle tue verifiche ${better == 'dc' ? 'Dixon-Coles' : 'Elo'} ha previsto meglio, con un errore più basso.',
+        AdviceLevel.tip,
+        'Usalo',
+        () {
+          s.model = better;
+          saveSettings();
+        },
+      ));
+    } else if (!modelTested('elo') || !modelTested('dc')) {
+      out.add(Advice(
+        'Confronta i due modelli',
+        'Fai una verifica con Elo e una con Dixon-Coles, con peso del mercato 0% e le stesse stagioni: '
+            'l’app ricorderà quale prevede meglio e te lo consiglierà.',
+        AdviceLevel.tip,
+        'Vai alla verifica',
+        () => goToTab(3),
+      ));
+    }
+    return out;
+  }
 
   // "k2": la calibrazione include anche il K variabile a inizio stagione.
   String _calibKey(int cur) => 'k3-${settings.calibFrom}-${settings.calibToFor(cur)}-$cur';

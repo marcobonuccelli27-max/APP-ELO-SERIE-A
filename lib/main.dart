@@ -57,7 +57,6 @@ class Shell extends StatefulWidget {
 }
 
 class _ShellState extends State<Shell> {
-  int index = 0;
 
   static const _screens = [
     GiornataScreen(),
@@ -69,11 +68,12 @@ class _ShellState extends State<Shell> {
 
   @override
   Widget build(BuildContext context) {
+    final app = AppScope.of(context);
     return Scaffold(
-      body: IndexedStack(index: index, children: _screens),
+      body: IndexedStack(index: app.tab, children: _screens),
       bottomNavigationBar: CupertinoTabBar(
-        currentIndex: index,
-        onTap: (i) => setState(() => index = i),
+        currentIndex: app.tab,
+        onTap: app.goToTab,
         activeColor: C.blue,
         inactiveColor: C.grey,
         backgroundColor: const Color(0xF2F9F9F9),
