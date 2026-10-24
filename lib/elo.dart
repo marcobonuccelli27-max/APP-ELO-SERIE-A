@@ -503,8 +503,10 @@ class BacktestArgs {
   final int calibTo;
   final String model; // 'elo' oppure 'dc'
   final double? fixedHalfLife; // emivita manuale per Dixon-Coles
+  final double marketWeight; // peso del mercato nelle probabilità (0 = solo modello)
 
   const BacktestArgs({
+    this.marketWeight = 0,
     this.model = 'elo',
     this.fixedHalfLife,
     required this.testSeasons,
@@ -541,9 +543,13 @@ class BacktestResult {
   final int testFrom;
   final int testTo;
   final List<ThresholdRow> sweep; // risultati con ogni soglia da 1,00 a 1,20
+  final List<ValueBand> buckets; // risultati per fascia di valore
+  final double marketWeight;
   final String? error;
 
   BacktestResult({
+    this.buckets = const [],
+    this.marketWeight = 0,
     this.sweep = const [],
     required this.bets,
     required this.skippedLeastLikely,
@@ -602,6 +608,11 @@ List<double> fairProbs(List<double> odds) {
   return inv.map((x) => x / s).toList();
 }
 
+/// Media pesata tra probabilità del modello e del mercato (senza margine).
+/// [w] = peso del mercato, da 0 (solo modello) a 1 (solo mercato).
+List<double> blendProbs(List<double> model, List<double> market, double w) =>
+    [for (var k = 0; k < model.length; k++) (1 - w) * model[k] + w * market[k]];
+
 /// Simula di aver usato il modello sulle ultime stagioni complete, calibrandolo
 /// solo su stagioni precedenti a quelle provate.
 BacktestResult backtest(List<MatchResult> ms, BacktestArgs args) {
@@ -655,7 +666,8 @@ BacktestResult backtest(List<MatchResult> ms, BacktestArgs args) {
   for (var i = testStart; i < upto.length; i++) {
     final m = upto[i];
     nTest++;
-    final p = testProbs[i - testStart];
+    final pm = testProbs[i - testStart];
+    final p = args.marketWeight > 0 && m.odds != null ? blendProbs(pm, fairProbs(m.odds!), args.marketWeight) : pm;
     final o = m.outcome;
     final ref = m.closing ?? m.odds;
     if (ref != null) {
@@ -669,6 +681,9 @@ BacktestResult backtest(List<MatchResult> ms, BacktestArgs args) {
   final chosen = _runBets(picks, args.threshold, args.stake, args.budget, true);
   final sweep = <ThresholdRow>[
     for (var t = 100; t <= 120; t++) _runBets(picks, t / 100, args.stake, args.budget, false).row(t / 100)
+  ];
+  final buckets = <ValueBand>[
+    for (final b in valueBands) ValueBand(b.$3, _runBets(picks, b.$1, args.stake, args.budget, false, hi: b.$2).row(b.$1)),
   ];
   final bets = chosen.bets, skipped = chosen.skipped, staked = chosen.staked, profit = chosen.profit;
   final margin = chosen.margin, clvChecked = chosen.clvChecked, clvBeaten = chosen.clvBeaten;
@@ -697,7 +712,24 @@ BacktestResult backtest(List<MatchResult> ms, BacktestArgs args) {
     testFrom: testFrom,
     testTo: testTo,
     sweep: sweep,
+    buckets: buckets,
+    marketWeight: args.marketWeight,
   );
+}
+
+/// Fasce di valore per la tabella della verifica: da, a (escluso), etichetta.
+const valueBands = <(double, double, String)>[
+  (0, 1.00, 'sotto 1,00'),
+  (1.00, 1.05, '1,00–1,05'),
+  (1.05, 1.10, '1,05–1,10'),
+  (1.10, 1.20, '1,10–1,20'),
+  (1.20, double.infinity, 'da 1,20 in su'),
+];
+
+class ValueBand {
+  final String label;
+  final ThresholdRow stats;
+  const ValueBand(this.label, this.stats);
 }
 
 class _TestMatch {
@@ -727,7 +759,8 @@ class _BetStats {
 }
 
 /// Simula le scommesse con una certa soglia di valore.
-_BetStats _runBets(List<_TestMatch> ms, double threshold, double stake, double budget, bool series) {
+_BetStats _runBets(List<_TestMatch> ms, double threshold, double stake, double budget, bool series,
+    {double hi = double.infinity}) {
   final st = _BetStats();
   if (series) st.bankroll.add(budget);
   final returns = <double>[];
@@ -741,7 +774,7 @@ _BetStats _runBets(List<_TestMatch> ms, double threshold, double stake, double b
         pick = k;
       }
     }
-    if (ev < threshold) continue;
+    if (ev < threshold || ev >= hi) continue;
     if (isLeastLikely(p, pick)) {
       st.skipped++;
       continue;

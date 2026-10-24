@@ -182,6 +182,7 @@ class MatchCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final best = pred.best(settings.excludedBooks);
     final e = eval;
+    final shown = e?.used ?? pred.p;
     return Material(
       color: C.fill,
       borderRadius: BorderRadius.circular(16),
@@ -207,6 +208,12 @@ class MatchCard extends StatelessWidget {
                     : 'Elo ${pred.eloH.round()} contro ${pred.eloA.round()}',
                 style: const TextStyle(fontSize: 12, color: C.grey),
               ),
+              if (settings.marketWeight > 0 && e != null)
+                Text(
+                  'Probabilità: ${fmt((1 - settings.marketWeight) * 100, 0)}% modello, '
+                  '${fmt(settings.marketWeight * 100, 0)}% mercato',
+                  style: const TextStyle(fontSize: 12, color: C.grey),
+                ),
               if (pred.unknownTeam)
                 const Padding(
                   padding: EdgeInsets.only(top: 4),
@@ -214,7 +221,7 @@ class MatchCard extends StatelessWidget {
                       style: TextStyle(fontSize: 12, color: C.warn)),
                 ),
               const SizedBox(height: 12),
-              ProbBar(pred.p),
+              ProbBar(shown),
               const SizedBox(height: 10),
               Row(children: [
                 for (var k = 0; k < 3; k++) ...[
@@ -222,7 +229,7 @@ class MatchCard extends StatelessWidget {
                   Expanded(
                     child: _OutcomeCell(
                       label: outcomeLabels[k],
-                      prob: pred.p[k],
+                      prob: shown[k],
                       odds: best?.odds[k],
                       highlighted: e != null && e.hasValue && e.pick == k,
                     ),
@@ -244,15 +251,15 @@ class MatchCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 6),
                 Text(
-                  'Secondo il modello questo esito esce il ${pct(pred.p[e.pick])} delle volte: '
-                  'perderai comunque circa ${pct(1 - pred.p[e.pick])} delle giocate come questa.',
+                  'Secondo il modello questo esito esce il ${pct(e.used[e.pick])} delle volte: '
+                  'perderai comunque circa ${pct(1 - e.used[e.pick])} delle giocate come questa.',
                   style: const TextStyle(fontSize: 12, height: 1.4, color: C.grey),
                 ),
               ] else if (e.overThreshold && e.leastLikely)
                 _Discouraged(
                   'Sconsigliata. La quota su ${outcomeLabels[e.pick]} è conveniente (valore ${fmt(e.ev)}), '
-                  'ma è l’esito meno probabile: secondo il modello esce solo il ${pct(pred.p[e.pick])} delle volte, '
-                  'circa una volta su ${(1 / pred.p[e.pick]).round()}.',
+                  'ma è l’esito meno probabile: secondo il modello esce solo il ${pct(e.used[e.pick])} delle volte, '
+                  'circa una volta su ${(1 / e.used[e.pick]).round()}.',
                 )
               else if (e.overThreshold && pred.unknownTeam)
                 const _Discouraged('Sconsigliata: una squadra non è stata riconosciuta, quindi la stima non è affidabile.')
@@ -268,6 +275,9 @@ class MatchCard extends StatelessWidget {
   }
 
   void _showDetail(BuildContext context, BestOdds? best) {
+    final ev = pred.evaluate(settings);
+    final used = ev?.used ?? pred.p;
+    final mixed = settings.marketWeight > 0 && ev != null;
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: C.white,
@@ -301,14 +311,14 @@ class MatchCard extends StatelessWidget {
                     padding: const EdgeInsets.symmetric(vertical: 6),
                     child: Row(children: [
                       SizedBox(width: 36, child: Text(outcomeLabels[k], style: cell.copyWith(fontWeight: FontWeight.w700))),
-                      Expanded(child: Text(pct(pred.p[k], 1), style: cell, textAlign: TextAlign.right)),
+                      Expanded(child: Text(pct(used[k], 1), style: cell, textAlign: TextAlign.right)),
                       Expanded(child: Text(best == null ? '—' : fmt(best.odds[k]), style: cell, textAlign: TextAlign.right)),
                       Expanded(child: Text(best == null ? '—' : pct(1 / best.odds[k], 1), style: cell, textAlign: TextAlign.right)),
                       Expanded(
                         child: Text(
-                          best == null ? '—' : fmt(pred.p[k] * best.odds[k]),
+                          best == null ? '—' : fmt(used[k] * best.odds[k]),
                           style: cell.copyWith(
-                            color: best != null && pred.p[k] * best.odds[k] >= settings.threshold ? C.blueText : C.ink,
+                            color: best != null && used[k] * best.odds[k] >= settings.threshold ? C.blueText : C.ink,
                             fontWeight: FontWeight.w700,
                           ),
                           textAlign: TextAlign.right,
@@ -316,6 +326,16 @@ class MatchCard extends StatelessWidget {
                       ),
                     ]),
                   ),
+                if (mixed) ...[
+                  const SizedBox(height: 10),
+                  Text(
+                    'Mescolate: ${fmt((1 - settings.marketWeight) * 100, 0)}% modello e '
+                    '${fmt(settings.marketWeight * 100, 0)}% mercato.\n'
+                    'Solo modello: 1 ${pct(pred.p[0], 1)} · X ${pct(pred.p[1], 1)} · 2 ${pct(pred.p[2], 1)}\n'
+                    'Mercato senza margine: 1 ${pct(ev!.market[0], 1)} · X ${pct(ev!.market[1], 1)} · 2 ${pct(ev!.market[2], 1)}',
+                    style: const TextStyle(fontSize: 13, color: C.ink2, height: 1.5),
+                  ),
+                ],
                 if (best != null) ...[
                   const SizedBox(height: 12),
                   Text(
@@ -965,6 +985,7 @@ class VerificaScreen extends StatefulWidget {
 class _VerificaScreenState extends State<VerificaScreen> {
   int seasons = 3;
   String? model;
+  int? weightPct; // peso del mercato in percentuale
   double? thr;
   bool running = false;
   BacktestResult? result;
@@ -976,7 +997,8 @@ class _VerificaScreenState extends State<VerificaScreen> {
       error = null;
     });
     try {
-      final r = await app.runBacktest(seasons, thr ?? app.settings.threshold, model ?? app.settings.model);
+      final r = await app.runBacktest(seasons, thr ?? app.settings.threshold, model ?? app.settings.model,
+          (weightPct ?? (app.settings.marketWeight * 100).round()) / 100);
       if (!mounted) return;
       setState(() {
         result = r;
@@ -994,6 +1016,7 @@ class _VerificaScreenState extends State<VerificaScreen> {
     final app = AppScope.of(context);
     final t = thr ?? app.settings.threshold.clamp(1.0, 1.2).toDouble();
     final m = model ?? app.settings.model;
+    final wp = weightPct ?? (app.settings.marketWeight * 100).round();
     final r = result;
     return SafeArea(
       bottom: false,
@@ -1018,6 +1041,23 @@ class _VerificaScreenState extends State<VerificaScreen> {
                     'dc': Padding(padding: EdgeInsets.symmetric(vertical: 7), child: Text('Dixon-Coles')),
                   },
                   onValueChanged: (v) => setState(() => model = v ?? 'elo'),
+                ),
+              ),
+              const SizedBox(height: 16),
+              const Text('Peso del mercato nelle probabilità', style: TextStyle(fontSize: 13, color: C.grey)),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: CupertinoSlidingSegmentedControl<int>(
+                  groupValue: const [0, 25, 50, 75].contains(wp) ? wp : null,
+                  backgroundColor: C.fill2,
+                  children: const {
+                    0: Padding(padding: EdgeInsets.symmetric(vertical: 7), child: Text('0%')),
+                    25: Padding(padding: EdgeInsets.symmetric(vertical: 7), child: Text('25%')),
+                    50: Padding(padding: EdgeInsets.symmetric(vertical: 7), child: Text('50%')),
+                    75: Padding(padding: EdgeInsets.symmetric(vertical: 7), child: Text('75%')),
+                  },
+                  onValueChanged: (v) => setState(() => weightPct = v ?? 0),
                 ),
               ),
               const SizedBox(height: 16),
@@ -1157,6 +1197,7 @@ class _VerificaScreenState extends State<VerificaScreen> {
         ]),
       ),
       Notice(verdict.$2, title: verdict.$1, tone: verdict.$3),
+      if (r.buckets.isNotEmpty) _ValueBands(r: r),
       if (r.sweep.isNotEmpty)
         _BestThresholds(
           r: r,
@@ -1174,7 +1215,8 @@ class _VerificaScreenState extends State<VerificaScreen> {
       Padding(
         padding: const EdgeInsets.only(top: 12, left: 4),
         child: Text(
-          '${r.model == 'dc' ? 'Dixon-Coles' : 'Elo'}, '
+          '${r.model == 'dc' ? 'Dixon-Coles' : 'Elo'}'
+          '${r.marketWeight > 0 ? ' mescolato al ${fmt(r.marketWeight * 100, 0)}% con le quote Bet365 senza margine' : ''}, '
           '${r.manual ? 'con i tuoi valori' : 'calibrato su ${seasonLabel(r.trainFrom)}–${seasonLabel(r.trainTo)}'}: '
           '${r.model == 'dc' ? 'emivita ${fmt(r.halfLife, 0)} giorni' : '${kCurve(r.params)}; casa +${fmt(r.params.home, 0)}, riavvicinamento ${fmt(r.params.regress * 100, 0)}%'}. '
           'Provato su ${seasonLabel(r.testFrom)}–${seasonLabel(r.testTo)} con le quote Bet365 '
@@ -1336,6 +1378,84 @@ class _BestThresholds extends StatelessWidget {
       const Text('Tutte le soglie', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: C.ink)),
       const SizedBox(height: 8),
       _SweepTable(rows: r.sweep, current: current),
+    ]);
+  }
+}
+
+/// Risultati divisi per fascia di valore: le giocate con valore alto vanno davvero meglio?
+class _ValueBands extends StatelessWidget {
+  final BacktestResult r;
+  const _ValueBands({required this.r});
+
+  @override
+  Widget build(BuildContext context) {
+    const head = TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: C.grey);
+    const cell = TextStyle(fontSize: 13, color: C.ink, fontFeatures: [FontFeature.tabularFigures()]);
+    Widget c(String t, TextStyle st, double w, {TextAlign a = TextAlign.right}) =>
+        SizedBox(width: w, child: Text(t, style: st, textAlign: a));
+    final bands = r.buckets;
+    // Confronto tra le fasce sopra 1: la più alta va peggio della più bassa?
+    final valued = bands.where((b) => b.stats.threshold >= 1 && b.stats.bets >= 20).toList();
+    String? reading;
+    if (valued.length >= 2) {
+      final low = valued.first.stats, high = valued.last.stats;
+      reading = high.roi < low.roi
+          ? 'Qui le giocate con valore più alto sono andate peggio di quelle con valore basso: '
+              'conferma che un valore molto alto spesso è un errore del modello più che un’occasione.'
+          : 'Qui le giocate con valore più alto sono andate meglio, ma guarda il margine: '
+              'con poche giocate per fascia la differenza può essere solo fortuna.';
+    }
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      const SizedBox(height: 22),
+      const Text('Risultati per fascia di valore',
+          style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: C.ink)),
+      const SizedBox(height: 4),
+      const Text('Tutte le giocate della verifica divise in base al valore stimato, qualunque sia la soglia.',
+          style: TextStyle(fontSize: 13, height: 1.4, color: C.grey)),
+      const SizedBox(height: 10),
+      Container(
+        decoration: BoxDecoration(color: C.fill, borderRadius: BorderRadius.circular(14)),
+        clipBehavior: Clip.antiAlias,
+        child: Column(children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+            child: Row(children: [
+              c('Valore', head, 92, a: TextAlign.left),
+              const Spacer(),
+              c('Giocate', head, 50),
+              c('ROI', head, 84),
+              c('Scese', head, 46),
+            ]),
+          ),
+          const Divider(height: 1, color: C.line),
+          for (final b in bands)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Row(children: [
+                c(b.label, cell.copyWith(fontWeight: FontWeight.w600), 92, a: TextAlign.left),
+                const Spacer(),
+                c('${b.stats.bets}', cell, 50),
+                c(
+                  b.stats.bets == 0
+                      ? '—'
+                      : '${signedPct(b.stats.roi)} ±${fmt(b.stats.margin * 100, 0)}',
+                  cell.copyWith(color: b.stats.roi < 0 ? C.warn : C.ink),
+                  84,
+                ),
+                c(b.stats.clvChecked == 0 ? '—' : pct(b.stats.clvShare), cell, 46),
+              ]),
+            ),
+        ]),
+      ),
+      Padding(
+        padding: const EdgeInsets.only(top: 10, left: 4),
+        child: Text(
+          '${reading ?? 'Servono almeno 20 giocate in due fasce per confrontarle.'} '
+          'La fascia “sotto 1,00” sono le partite che l’app non ti avrebbe consigliato: è il riferimento per capire '
+          'se le altre fanno davvero meglio.',
+          style: const TextStyle(fontSize: 12, height: 1.45, color: C.grey),
+        ),
+      ),
     ]);
   }
 }
@@ -1591,6 +1711,8 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
             footer: (s.autoCalib
                     ? 'La calibrazione automatica prova centinaia di combinazioni sulle stagioni scelte e tiene quella che prevede meglio. '
                     : 'Dopo aver cambiato i valori, premi “Ricalcola con questi valori”. ') +
+                'Il peso del mercato mescola le probabilità del modello con quelle delle quote senza margine: '
+                'ridimensiona i valori esagerati, che spesso sono errori del modello. '
                 'Dixon-Coles stima attacco e difesa di ogni squadra dai gol, dando più peso alle partite recenti, '
                 'e calcola anche over/under 2,5 e goal/no goal. La classifica Elo resta sempre disponibile. '
                 'Le stagioni scelte servono anche a stimare la probabilità dei pareggi. La prima stagione dei dati '
@@ -1741,6 +1863,28 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
                     },
                   ),
                 ),
+              SettingRow(
+                label: 'Peso del mercato',
+                sub: s.marketWeight == 0
+                    ? 'Solo il modello'
+                    : 'Probabilità: ${fmt((1 - s.marketWeight) * 100, 0)}% modello, ${fmt(s.marketWeight * 100, 0)}% quote',
+                trailing: CupertinoSlidingSegmentedControl<int>(
+                  groupValue: const [0, 25, 50, 75].contains((s.marketWeight * 100).round())
+                      ? (s.marketWeight * 100).round()
+                      : null,
+                  backgroundColor: C.fill2,
+                  children: const {
+                    0: Padding(padding: EdgeInsets.symmetric(horizontal: 6, vertical: 6), child: Text('0')),
+                    25: Padding(padding: EdgeInsets.symmetric(horizontal: 6, vertical: 6), child: Text('25')),
+                    50: Padding(padding: EdgeInsets.symmetric(horizontal: 6, vertical: 6), child: Text('50')),
+                    75: Padding(padding: EdgeInsets.symmetric(horizontal: 6, vertical: 6), child: Text('75')),
+                  },
+                  onValueChanged: (v) {
+                    s.marketWeight = (v ?? 0) / 100;
+                    save();
+                  },
+                ),
+              ),
               SettingRow(
                 label: 'Valori in uso',
                 sub: '${kCurve(p)}. Vantaggio casa +${fmt(p.home, 0)}, riavvicinamento estivo ${fmt(p.regress * 100, 0)}%.'

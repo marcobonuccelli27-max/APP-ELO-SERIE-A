@@ -26,6 +26,7 @@ class Settings {
   int calibFrom; // prima stagione usata per calibrare
   int calibTo; // ultima stagione usata per calibrare; 0 = l'ultima completa
   String model; // 'elo' oppure 'dc' (Dixon-Coles)
+  double marketWeight; // peso delle quote nelle probabilità: 0 = solo modello
   double dcHalfLife; // emivita manuale per Dixon-Coles, in giorni
   Set<String> excludedBooks;
 
@@ -44,6 +45,7 @@ class Settings {
     this.calibFrom = firstSeason,
     this.calibTo = 0,
     this.model = 'elo',
+    this.marketWeight = 0,
     this.dcHalfLife = dcDefaultHalfLife,
     Set<String>? excludedBooks,
   }) : excludedBooks = excludedBooks ?? {'Pinnacle', '1xBet', 'Matchbook'};
@@ -70,6 +72,7 @@ class Settings {
         'calibFrom': calibFrom,
         'calibTo': calibTo,
         'model': model,
+        'marketWeight': marketWeight,
         'dcHalfLife': dcHalfLife,
         'excludedBooks': excludedBooks.toList(),
       };
@@ -91,6 +94,7 @@ class Settings {
       calibFrom: j['calibFrom'] as int? ?? firstSeason,
       calibTo: j['calibTo'] as int? ?? 0,
       model: j['model'] as String? ?? 'elo',
+      marketWeight: n('marketWeight', 0),
       dcHalfLife: n('dcHalfLife', dcDefaultHalfLife),
       excludedBooks: (j['excludedBooks'] as List<dynamic>?)?.map((e) => e as String).toSet(),
     );
@@ -110,7 +114,10 @@ class Evaluation {
   final bool overThreshold; // il valore supera la soglia
   final bool leastLikely; // la scelta è l'esito meno probabile
   final bool hasValue; // giocata consigliata
-  Evaluation(this.pick, this.ev, this.evs, this.overThreshold, this.leastLikely, this.hasValue);
+  final List<double> used; // probabilità usate: modello, eventualmente mescolato con il mercato
+  final List<double> market; // probabilità delle quote migliori, senza margine
+  Evaluation(this.pick, this.ev, this.evs, this.overThreshold, this.leastLikely, this.hasValue, this.used,
+      this.market);
 }
 
 class OuEvaluation {
@@ -175,6 +182,12 @@ class Prediction {
       }
     });
     if (best[0] <= 1 || best[1] <= 1) return null;
+    if (s.marketWeight > 0) {
+      final fair = fairProbs(best);
+      for (var k = 0; k < 2; k++) {
+        probs[k] = (1 - s.marketWeight) * probs[k] + s.marketWeight * fair[k];
+      }
+    }
     final side = probs[0] * best[0] >= probs[1] * best[1] ? 0 : 1;
     final ev = probs[side] * best[side];
     return OuEvaluation(side, probs[side], best[side], names[side], ev, ev >= s.threshold && !unknownTeam,
@@ -201,14 +214,16 @@ class Prediction {
   Evaluation? evaluate(Settings s) {
     final b = best(s.excludedBooks);
     if (b == null) return null;
-    final evs = List<double>.generate(3, (k) => p[k] * b.odds[k]);
+    final market = fairProbs(b.odds);
+    final used = s.marketWeight > 0 ? blendProbs(p, market, s.marketWeight) : p;
+    final evs = List<double>.generate(3, (k) => used[k] * b.odds[k]);
     var pick = 0;
     for (var k = 1; k < 3; k++) {
       if (evs[k] > evs[pick]) pick = k;
     }
     final over = evs[pick] >= s.threshold;
-    final least = isLeastLikely(p, pick);
-    return Evaluation(pick, evs[pick], evs, over, least, over && !least && !unknownTeam);
+    final least = isLeastLikely(used, pick);
+    return Evaluation(pick, evs[pick], evs, over, least, over && !least && !unknownTeam, used, market);
   }
 
   Map<String, dynamic> toJson() => {
@@ -644,9 +659,10 @@ class AppState extends ChangeNotifier {
     return SlipAnalysis(out, stake, bonus, note);
   }
 
-  Future<BacktestResult> runBacktest(int seasons, double threshold, String model) async {
+  Future<BacktestResult> runBacktest(int seasons, double threshold, String model, double marketWeight) async {
     final h = await _ensureHistory();
     final args = BacktestArgs(
+      marketWeight: marketWeight,
       model: model,
       fixedHalfLife: settings.autoCalib ? null : settings.dcHalfLife,
       testSeasons: seasons,
