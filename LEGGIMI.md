@@ -65,6 +65,10 @@ Nella scheda **Schedina** fotografa una schedina, scegli uno screenshot dalla ga
 
 Premi **Analizza la schedina** per vedere, per ogni giocata, la probabilità secondo Dixon-Coles, quella implicita nella quota e il valore, e per la schedina intera la probabilità di vincerla e quanto torna in media ogni 100 € giocati così. Per le partite già giocate l’app usa solo i dati di prima, così la stima è onesta, e ti dice anche com’è finita.
 
+## Peso del mercato
+
+In **Impostazioni › Modello › Peso del mercato** puoi mescolare le probabilità del modello con quelle delle quote, tolto il margine: 0% usa solo il modello, 50% fa metà e metà. Serve a ridimensionare i valori esagerati, che spesso nascono da qualcosa che il modello non sa. Nella verifica puoi provare i diversi pesi e guardare la tabella **Risultati per fascia di valore** per capire se le giocate con valore alto vanno davvero meglio o peggio di quelle con valore basso.
+
 ## Storico e calendario
 
 Dopo l’analisi puoi premere **Salva e segna sul calendario**: la schedina finisce nello **Storico** e si apre il calendario del telefono con l’evento già compilato, nel giorno delle partite. Con **Salva solo nello storico** la salvi senza calendario. Nello Storico ogni schedina si aggiorna da sola come vinta, persa o in corso dopo ogni “Aggiorna dati”, e in alto trovi quanto hai giocato, vinto, il saldo e quanto si aspettava il modello.
