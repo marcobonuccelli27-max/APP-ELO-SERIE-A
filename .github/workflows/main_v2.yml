@@ -1,0 +1,49 @@
+name: Compila APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Scarica il codice
+        uses: actions/checkout@v4
+
+      - name: Installa Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Installa Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.24.5
+          cache: true
+
+      - name: Prepara la parte Android
+        run: |
+          flutter create . --platforms=android --org it.eloseriea --project-name elo_serie_a
+          sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <application#' android/app/src/main/AndroidManifest.xml
+          sed -i 's#android:label="elo_serie_a"#android:label="Elo Serie A"#' android/app/src/main/AndroidManifest.xml
+          rm -rf test
+
+      - name: Scarica le librerie
+        run: flutter pub get
+
+      - name: Compila l'app
+        run: flutter build apk --release
+
+      - name: Pubblica l'APK nelle Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Elo Serie A - versione ${{ github.run_number }}
+          files: build/app/outputs/flutter-apk/app-release.apk
