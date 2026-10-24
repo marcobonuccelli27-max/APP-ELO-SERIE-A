@@ -26,6 +26,10 @@ Apri la pagina Releases dal telefono, scarica `app-release.apk` e aprilo. Androi
 
 **Aggiornamenti.** Se in futuro cambi qualcosa nel codice, carica i file nuovi su GitHub e la compilazione riparte da sola. Il file `debug.keystore` contiene la chiave con cui viene firmata l’app: così ogni nuova versione si installa sopra la precedente senza disinstallarla. Serve solo per questa app personale.
 
+## Impostazioni guidate
+
+Al primo avvio la schermata Giornata mostra **Come usare questa app** con il pulsante **Applica le impostazioni consigliate**. In cima alle Impostazioni il **Controllo delle impostazioni** segnala cosa si discosta dai valori consigliati, spiega perché e offre un pulsante per correggere. Dopo ogni verifica, la sezione **Cosa fare adesso** propone il passo successivo, e l’app ricorda quale modello ha previsto meglio per consigliartelo.
+
 ## Primo avvio
 
 1. Apri **Impostazioni** e controlla budget, puntata e soglia. I valori iniziali sono 200 €, 2% e 1,05.
