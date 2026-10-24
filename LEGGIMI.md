@@ -40,7 +40,9 @@ Se vuoi impostare i valori a mano, disattiva la calibrazione automatica e parti 
 
 | Valore | Da dove partire | Cosa fa |
 |---|---|---|
-| Fattore K | 20 | Quanto si muovono i punteggi dopo ogni partita |
+| Fattore K | 20 | Quanto si muovono i punteggi dopo ogni partita, dal girone di ritorno |
+| K in più a inizio stagione | 50% | Alla 1ª giornata K è più alto di questa percentuale, poi scende fino alla 19ª |
+| Come scende K | Lineare | Lineare: la stessa quantità a ogni giornata. Curva: veloce nelle prime giornate, poi più lenta |
 | Vantaggio casa | 65 | Punti Elo in più per chi gioca in casa |
 | Riavvicinamento estivo | 25% | Quanto i punteggi tornano verso la media a inizio stagione |
 
@@ -62,6 +64,10 @@ Le quote over/under arrivano da football-data. Con The Odds API l’app scarica 
 Nella scheda **Schedina** fotografa una schedina, scegli uno screenshot dalla galleria oppure inserisci le giocate a mano. L’app legge il testo direttamente sul telefono, senza internet, e riconosce partite, mercati e quote: 1X2, doppia chance, under/over, goal/no goal, le combinazioni tra questi e i multigoal. Controlla sempre le giocate lette: toccandone una puoi correggerla.
 
 Premi **Analizza la schedina** per vedere, per ogni giocata, la probabilità secondo Dixon-Coles, quella implicita nella quota e il valore, e per la schedina intera la probabilità di vincerla e quanto torna in media ogni 100 € giocati così. Per le partite già giocate l’app usa solo i dati di prima, così la stima è onesta, e ti dice anche com’è finita.
+
+## Storico e calendario
+
+Dopo l’analisi puoi premere **Salva e segna sul calendario**: la schedina finisce nello **Storico** e si apre il calendario del telefono con l’evento già compilato, nel giorno delle partite. Con **Salva solo nello storico** la salvi senza calendario. Nello Storico ogni schedina si aggiorna da sola come vinta, persa o in corso dopo ogni “Aggiorna dati”, e in alto trovi quanto hai giocato, vinto, il saldo e quanto si aspettava il modello.
 
 ## Fonti delle quote
 
