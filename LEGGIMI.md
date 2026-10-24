@@ -7,7 +7,7 @@ App Android che calcola i punteggi Elo delle squadre di Serie A, stima le probab
 - `lib/` contiene il codice dell’app (Flutter).
 - `pubspec.yaml` elenca le librerie che servono.
 - `compila-apk.yml` è l’automazione che fa compilare l’app a GitHub.
-- `firma/` contiene la chiave che firma l’app, sempre la stessa a ogni versione.
+- `debug.keystore` è la chiave che firma l’app, sempre la stessa a ogni versione.
 - `LEGGIMI.md` è questo file.
 
 ## Come ottenere l’APK (una volta sola, circa 15 minuti)
@@ -24,7 +24,7 @@ App Android che calcola i punteggi Elo delle squadre di Serie A, stima le probab
 
 Apri la pagina Releases dal telefono, scarica `app-release.apk` e aprilo. Android chiederà di autorizzare l’installazione da fonti sconosciute per il browser che stai usando: è normale per le app che non vengono dal Play Store.
 
-**Aggiornamenti.** Se in futuro cambi qualcosa nel codice, carica i file nuovi su GitHub e la compilazione riparte da sola. La cartella `firma` contiene la chiave con cui viene firmata l’app: così ogni nuova versione si installa sopra la precedente senza disinstallarla. Serve solo per questa app personale.
+**Aggiornamenti.** Se in futuro cambi qualcosa nel codice, carica i file nuovi su GitHub e la compilazione riparte da sola. Il file `debug.keystore` contiene la chiave con cui viene firmata l’app: così ogni nuova versione si installa sopra la precedente senza disinstallarla. Serve solo per questa app personale.
 
 ## Primo avvio
 
@@ -56,6 +56,12 @@ In **Impostazioni › Modello** scegli il modello che calcola le previsioni.
 Nella **Verifica sul passato** puoi scegliere il modello e confrontare i due sulle stesse stagioni: vince quello con l’errore più basso. La classifica Elo e quella **Attacco e difesa** sono sempre disponibili in Classifiche.
 
 Le quote over/under arrivano da football-data. Con The Odds API l’app scarica solo le quote 1X2 per non consumare richieste in più, quindi vedrai le probabilità over/under ma non il valore.
+
+## Controllare una schedina
+
+Nella scheda **Schedina** fotografa una schedina, scegli uno screenshot dalla galleria oppure inserisci le giocate a mano. L’app legge il testo direttamente sul telefono, senza internet, e riconosce partite, mercati e quote: 1X2, doppia chance, under/over, goal/no goal, le combinazioni tra questi e i multigoal. Controlla sempre le giocate lette: toccandone una puoi correggerla.
+
+Premi **Analizza la schedina** per vedere, per ogni giocata, la probabilità secondo Dixon-Coles, quella implicita nella quota e il valore, e per la schedina intera la probabilità di vincerla e quanto torna in media ogni 100 € giocati così. Per le partite già giocate l’app usa solo i dati di prima, così la stima è onesta, e ti dice anche com’è finita.
 
 ## Fonti delle quote
 
