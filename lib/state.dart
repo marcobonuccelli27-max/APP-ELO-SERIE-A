@@ -22,6 +22,7 @@ class Settings {
   double home;
   double regress;
   double early; // aumento di K a inizio stagione (1 = doppio)
+  bool curved; // discesa di K curva invece che lineare
   int calibFrom; // prima stagione usata per calibrare
   int calibTo; // ultima stagione usata per calibrare; 0 = l'ultima completa
   String model; // 'elo' oppure 'dc' (Dixon-Coles)
@@ -39,6 +40,7 @@ class Settings {
     this.home = 70,
     this.regress = 0.25,
     this.early = 0.5,
+    this.curved = false,
     this.calibFrom = firstSeason,
     this.calibTo = 0,
     this.model = 'elo',
@@ -48,7 +50,7 @@ class Settings {
 
   double get stake => budget * stakePct / 100;
 
-  EloParams get manualParams => EloParams(k, home, regress, early);
+  EloParams get manualParams => EloParams(k, home, regress, early, curved);
 
   /// Ultima stagione di calibrazione effettiva.
   int calibToFor(int currentSeason) => calibTo == 0 ? currentSeason - 1 : calibTo;
@@ -64,6 +66,7 @@ class Settings {
         'home': home,
         'regress': regress,
         'early': early,
+        'curved': curved,
         'calibFrom': calibFrom,
         'calibTo': calibTo,
         'model': model,
@@ -84,6 +87,7 @@ class Settings {
       home: n('home', 70),
       regress: n('regress', 0.25),
       early: n('early', 0.5),
+      curved: j['curved'] as bool? ?? false,
       calibFrom: j['calibFrom'] as int? ?? firstSeason,
       calibTo: j['calibTo'] as int? ?? 0,
       model: j['model'] as String? ?? 'elo',
@@ -305,7 +309,7 @@ class AppState extends ChangeNotifier {
   int get currentSeason => currentSeasonStart(DateTime.now());
 
   // "k2": la calibrazione include anche il K variabile a inizio stagione.
-  String _calibKey(int cur) => 'k2-${settings.calibFrom}-${settings.calibToFor(cur)}-$cur';
+  String _calibKey(int cur) => 'k3-${settings.calibFrom}-${settings.calibToFor(cur)}-$cur';
 
   EloParams get paramsInUse =>
       settings.autoCalib ? (calibrated ?? EloParams.standard) : settings.manualParams;

@@ -15,7 +15,8 @@ const _pagePadding = EdgeInsets.fromLTRB(20, 16, 20, 40);
 /// K lungo la stagione, per esempio "K 30 alla 1ª giornata, 25 alla 10ª, 20 dalla 19ª".
 String kCurve(EloParams p) {
   if (p.early == 0) return 'K ${fmt(p.k, 0)} fisso';
-  return 'K ${fmt(p.kAt(0), 0)} alla 1ª giornata, ${fmt(p.kAt(9), 0)} alla 10ª, ${fmt(p.k, 0)} dalla 19ª';
+  return 'K ${fmt(p.kAt(0), 0)} alla 1ª giornata, ${fmt(p.kAt(4), 0)} alla 5ª, ${fmt(p.kAt(9), 0)} alla 10ª, '
+      '${fmt(p.k, 0)} dalla 19ª (discesa ${p.curved ? 'curva' : 'lineare'})';
 }
 
 // ===========================================================================
@@ -1675,6 +1676,22 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
                         s.early = n / 100;
                         save();
                       }
+                    },
+                  ),
+                ),
+                SettingRow(
+                  label: 'Come scende K',
+                  sub: s.curved ? 'Veloce nelle prime giornate, poi più lenta' : 'Della stessa quantità a ogni giornata',
+                  trailing: CupertinoSlidingSegmentedControl<bool>(
+                    groupValue: s.curved,
+                    backgroundColor: C.fill2,
+                    children: const {
+                      false: Padding(padding: EdgeInsets.symmetric(horizontal: 8, vertical: 6), child: Text('Lineare')),
+                      true: Padding(padding: EdgeInsets.symmetric(horizontal: 8, vertical: 6), child: Text('Curva')),
+                    },
+                    onValueChanged: (v) {
+                      s.curved = v ?? false;
+                      save();
                     },
                   ),
                 ),

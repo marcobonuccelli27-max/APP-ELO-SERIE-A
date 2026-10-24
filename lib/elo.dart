@@ -44,8 +44,9 @@ class EloParams {
   final double home; // punti di vantaggio per chi gioca in casa
   final double regress; // quota (0-1) di riavvicinamento alla media a inizio stagione
   final double early; // aumento di K alla prima giornata (1 = doppio), che scende fino alla 19ª
+  final bool curved; // discesa curva (veloce all'inizio, poi più lenta) invece che in linea retta
 
-  const EloParams(this.k, this.home, this.regress, [this.early = 0]);
+  const EloParams(this.k, this.home, this.regress, [this.early = 0, this.curved = false]);
 
   static const standard = EloParams(20, 70, 0.25, 0.5);
 
@@ -54,20 +55,23 @@ class EloParams {
 
   /// K effettivo dopo [played] partite giocate nella stagione.
   double kAt(double played) {
-    final f = (earlyRounds - played) / earlyRounds;
-    return k * (1 + early * (f > 0 ? f : 0));
+    var f = (earlyRounds - played) / earlyRounds;
+    if (f < 0) f = 0;
+    if (curved) f = f * f;
+    return k * (1 + early * f);
   }
 
   String get key =>
-      '${k.toStringAsFixed(2)}|${home.toStringAsFixed(2)}|${regress.toStringAsFixed(3)}|${early.toStringAsFixed(2)}';
+      '${k.toStringAsFixed(2)}|${home.toStringAsFixed(2)}|${regress.toStringAsFixed(3)}|${early.toStringAsFixed(2)}|${curved ? 'c' : 'l'}';
 
-  Map<String, dynamic> toJson() => {'k': k, 'home': home, 'regress': regress, 'early': early};
+  Map<String, dynamic> toJson() => {'k': k, 'home': home, 'regress': regress, 'early': early, 'curved': curved};
 
   factory EloParams.fromJson(Map<String, dynamic> j) => EloParams(
         (j['k'] as num).toDouble(),
         (j['home'] as num).toDouble(),
         (j['regress'] as num).toDouble(),
         (j['early'] as num?)?.toDouble() ?? 0,
+        j['curved'] as bool? ?? false,
       );
 }
 
@@ -272,8 +276,10 @@ EloParams calibrate(List<MatchResult> ms, {int from = 0, int to = 1 << 30}) {
   for (var k = 10.0; k <= 40; k += 4) {
     for (var h = 20.0; h <= 120; h += 10) {
       for (final reg in [0.1, 0.2, 0.3, 0.4]) {
-        for (final e in [0.0, 0.5, 1.0, 1.5, 2.0]) {
-          tryP(EloParams(k, h, reg, e));
+        tryP(EloParams(k, h, reg, 0));
+        for (final e in [0.5, 1.0, 1.5, 2.0, 3.0]) {
+          tryP(EloParams(k, h, reg, e, false));
+          tryP(EloParams(k, h, reg, e, true));
         }
       }
     }
@@ -285,7 +291,7 @@ EloParams calibrate(List<MatchResult> ms, {int from = 0, int to = 1 << 30}) {
       for (final reg in [c.regress - 0.05, c.regress, c.regress + 0.05]) {
         for (final e in [c.early - 0.25, c.early, c.early + 0.25]) {
           if (k < 4 || reg < 0 || reg > 0.9 || e < 0) continue;
-          tryP(EloParams(k, h, reg, e));
+          tryP(EloParams(k, h, reg, e, c.curved));
         }
       }
     }
