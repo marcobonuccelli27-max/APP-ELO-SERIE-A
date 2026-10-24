@@ -630,7 +630,7 @@ class _LegEditorState extends State<_LegEditor> {
               _label('Under o over'),
               _seg<String>(const {'U': 'Under', 'O': 'Over'}, leg.s2, (v) => leg.s2 = v),
               _label('Soglia gol'),
-              _seg<double>(const {0.5: '0,5', 1.5: '1,5', 2.5: '2,5', 3.5: '3,5', 4.5: '4,5'}, leg.line,
+              _seg<double>({0.5: '0,5', 1.5: '1,5', 2.5: '2,5', 3.5: '3,5', 4.5: '4,5'}, leg.line,
                   (v) => leg.line = v),
             ],
             if (usesGg(t)) ...[
