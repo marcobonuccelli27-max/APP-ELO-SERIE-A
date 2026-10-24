@@ -7,6 +7,7 @@ App Android che calcola i punteggi Elo delle squadre di Serie A, stima le probab
 - `lib/` contiene il codice dell’app (Flutter).
 - `pubspec.yaml` elenca le librerie che servono.
 - `compila-apk.yml` è l’automazione che fa compilare l’app a GitHub.
+- `firma/` contiene la chiave che firma l’app, sempre la stessa a ogni versione.
 - `LEGGIMI.md` è questo file.
 
 ## Come ottenere l’APK (una volta sola, circa 15 minuti)
@@ -23,7 +24,7 @@ App Android che calcola i punteggi Elo delle squadre di Serie A, stima le probab
 
 Apri la pagina Releases dal telefono, scarica `app-release.apk` e aprilo. Android chiederà di autorizzare l’installazione da fonti sconosciute per il browser che stai usando: è normale per le app che non vengono dal Play Store.
 
-**Aggiornamenti.** Se in futuro cambi qualcosa nel codice, carica i file nuovi su GitHub e la compilazione riparte da sola. Ogni versione è firmata con una chiave diversa, quindi prima di installare quella nuova disinstalla la vecchia. Perderai solo le impostazioni: i dati si riscaricano con un tocco.
+**Aggiornamenti.** Se in futuro cambi qualcosa nel codice, carica i file nuovi su GitHub e la compilazione riparte da sola. La cartella `firma` contiene la chiave con cui viene firmata l’app: così ogni nuova versione si installa sopra la precedente senza disinstallarla. Serve solo per questa app personale.
 
 ## Primo avvio
 
@@ -44,6 +45,17 @@ Se vuoi impostare i valori a mano, disattiva la calibrazione automatica e parti 
 | Riavvicinamento estivo | 25% | Quanto i punteggi tornano verso la media a inizio stagione |
 
 Poi premi **Ricalcola con questi valori**. La verifica sul passato calibra sempre in automatico sulle stagioni precedenti a quelle provate: così il test resta onesto.
+
+## Elo o Dixon-Coles
+
+In **Impostazioni › Modello** scegli il modello che calcola le previsioni.
+
+- **Elo**: un solo punteggio di forza per squadra. Veloce e semplice.
+- **Dixon-Coles**: stima per ogni squadra una forza d’attacco e una di difesa dai gol segnati e subiti, dando più peso alle partite recenti. Stima meglio i pareggi e calcola anche over/under 2,5 e goal/no goal. Il suo parametro è l’**emivita**: con 180 giorni, una partita di sei mesi fa conta la metà di una di oggi. La prima calibrazione può richiedere qualche decina di secondi.
+
+Nella **Verifica sul passato** puoi scegliere il modello e confrontare i due sulle stesse stagioni: vince quello con l’errore più basso. La classifica Elo e quella **Attacco e difesa** sono sempre disponibili in Classifiche.
+
+Le quote over/under arrivano da football-data. Con The Odds API l’app scarica solo le quote 1X2 per non consumare richieste in più, quindi vedrai le probabilità over/under ma non il valore.
 
 ## Fonti delle quote
 
