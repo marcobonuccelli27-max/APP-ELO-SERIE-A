@@ -1,5 +1,6 @@
 // Schermata Schedina: foto o screenshot, lettura del testo, correzione e analisi.
 
+import 'package:add_2_calendar/add_2_calendar.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
@@ -72,6 +73,8 @@ class _SchedinaScreenState extends State<SchedinaScreen> {
   String? message;
   List<String> rawRows = [];
   SlipAnalysis? analysis;
+  int view = 0; // 0 = nuova schedina, 1 = storico
+  String? savedId; // id della schedina corrente, se già salvata
 
   @override
   void dispose() {
@@ -87,6 +90,7 @@ class _SchedinaScreenState extends State<SchedinaScreen> {
       reading = true;
       message = null;
       analysis = null;
+      savedId = null;
     });
     try {
       await app.ensureHistoryLoaded();
@@ -144,6 +148,7 @@ class _SchedinaScreenState extends State<SchedinaScreen> {
     if (res == null) return;
     setState(() {
       analysis = null;
+      savedId = null;
       if (res.delete) {
         if (index != null) legs.removeAt(index);
       } else if (index == null) {
@@ -152,6 +157,29 @@ class _SchedinaScreenState extends State<SchedinaScreen> {
         legs[index] = res.leg;
       }
     });
+  }
+
+  Future<void> _save(AppState app, bool calendar) async {
+    final a = analysis;
+    if (a == null) return;
+    final slip = SavedSlip(
+      id: savedId ?? DateTime.now().microsecondsSinceEpoch.toString(),
+      savedAt: DateTime.now(),
+      legs: legs.map((l) => l.copy()).toList(),
+      stake: a.stake,
+      bonus: a.bonus,
+      modelProb: a.complete ? a.modelProb : null,
+      expectedReturn: a.complete ? a.expectedReturn : null,
+    );
+    if (calendar) slip.inCalendar = await addSlipToCalendar(slip);
+    await app.saveSlip(slip);
+    if (!mounted) return;
+    setState(() => savedId = slip.id);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(calendar && !slip.inCalendar
+          ? 'Salvata nello storico. Il calendario non si è aperto: controlla di avere un’app calendario.'
+          : 'Schedina salvata nello storico.'),
+    ));
   }
 
   @override
@@ -163,8 +191,31 @@ class _SchedinaScreenState extends State<SchedinaScreen> {
       child: ListView(
         padding: _pad,
         children: [
-          const PageHeader(title: 'Controlla una schedina', subtitle: 'Foto, screenshot o a mano'),
-          const SizedBox(height: 18),
+          const PageHeader(title: 'Schedine', subtitle: 'Controlla, salva e ritrova le tue giocate'),
+          const SizedBox(height: 16),
+          SizedBox(
+            width: double.infinity,
+            child: CupertinoSlidingSegmentedControl<int>(
+              groupValue: view,
+              children: {
+                0: const Padding(padding: EdgeInsets.symmetric(vertical: 8), child: Text('Nuova schedina')),
+                1: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Text('Storico (${app.savedSlips.length})'),
+                ),
+              },
+              onValueChanged: (v) => setState(() => view = v ?? 0),
+            ),
+          ),
+          const SizedBox(height: 16),
+          if (view == 1) _History(app: app) else ..._newSlip(app, busy),
+        ],
+      ),
+    );
+  }
+
+  List<Widget> _newSlip(AppState app, bool busy) {
+    return [
           PrimaryButton(
             label: reading ? 'Leggo la schedina…' : 'Fotografa la schedina',
             icon: CupertinoIcons.camera,
@@ -223,7 +274,28 @@ class _SchedinaScreenState extends State<SchedinaScreen> {
               icon: CupertinoIcons.chart_bar_alt_fill,
               onPressed: busy ? null : () => _analyze(app),
             ),
-            if (analysis != null) _Summary(a: analysis!),
+            if (analysis != null) ...[
+              _Summary(a: analysis!),
+              const SizedBox(height: 16),
+              if (savedId == null) ...[
+                PrimaryButton(
+                  label: 'Salva e segna sul calendario',
+                  icon: CupertinoIcons.calendar_badge_plus,
+                  onPressed: () => _save(app, true),
+                ),
+                const SizedBox(height: 10),
+                SizedBox(
+                  width: double.infinity,
+                  child: _SecondaryButton(
+                    label: 'Salva solo nello storico',
+                    icon: CupertinoIcons.tray_arrow_down,
+                    onPressed: () => _save(app, false),
+                  ),
+                ),
+              ] else
+                const Notice('Schedina salvata: la trovi nello Storico, dove si aggiorna da sola con i risultati.',
+                    tone: Tone.positive),
+            ],
             if (rawRows.isNotEmpty)
               Theme(
                 data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
@@ -242,9 +314,7 @@ class _SchedinaScreenState extends State<SchedinaScreen> {
                 ),
               ),
           ],
-        ],
-      ),
-    );
+    ];
   }
 }
 
@@ -672,5 +742,271 @@ class _LegEditorState extends State<_LegEditor> {
         ),
       ),
     );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Calendario e storico
+
+String _dateShort(DateTime d) => '${d.day}/${d.month}/${d.year}';
+
+/// Apre il calendario del telefono con l'evento della schedina già compilato.
+Future<bool> addSlipToCalendar(SavedSlip s) async {
+  final start = s.firstDate ?? s.savedAt;
+  var end = (s.lastDate ?? start).add(const Duration(hours: 2));
+  if (!end.isAfter(start)) end = start.add(const Duration(hours: 2));
+  final lines = <String>[
+    for (final l in s.legs) '${l.home} – ${l.away}: ${l.selectionLabel} (${_f(l.odds)})',
+    '',
+    'Importo ${euro(s.stake)} · quota totale ${_f(s.totalOdds)}',
+    'Vincita potenziale ${euro(s.payout)}${s.bonus > 0 ? ' (bonus compreso)' : ''}',
+    if (s.modelProb != null && s.modelProb! > 0)
+      'Secondo il modello: circa 1 volta su ${(1 / s.modelProb!).round()}, '
+          'in media tornano ${euro((s.expectedReturn ?? 0) * 100, 0)} ogni 100 €',
+    '',
+    'Salvata con Elo Serie A',
+  ];
+  try {
+    return await Add2Calendar.addEvent2Cal(Event(
+      title: 'Schedina ${euro(s.stake)} · quota ${_f(s.totalOdds)}',
+      description: lines.join('\n'),
+      startDate: start,
+      endDate: end,
+    ));
+  } catch (_) {
+    return false;
+  }
+}
+
+class _History extends StatelessWidget {
+  final AppState app;
+  const _History({required this.app});
+
+  @override
+  Widget build(BuildContext context) {
+    final slips = app.savedSlips;
+    if (slips.isEmpty) {
+      return const Notice(
+        'Quando analizzi una schedina puoi salvarla: la ritrovi qui, con i risultati aggiornati '
+        'a ogni “Aggiorna dati”.',
+        title: 'Nessuna schedina salvata',
+      );
+    }
+    var played = 0.0, won = 0.0, settledStake = 0.0, expected = 0.0, pendingStake = 0.0;
+    var nWon = 0, nLost = 0, nPending = 0;
+    final statuses = <(SlipStatus, List<bool?>)>[];
+    for (final s in slips) {
+      final st = app.statusOf(s);
+      statuses.add(st);
+      played += s.stake;
+      switch (st.$1) {
+        case SlipStatus.won:
+          nWon++;
+          won += s.payout;
+          settledStake += s.stake;
+          expected += s.stake * (s.expectedReturn ?? 0);
+          break;
+        case SlipStatus.lost:
+          nLost++;
+          settledStake += s.stake;
+          expected += s.stake * (s.expectedReturn ?? 0);
+          break;
+        case SlipStatus.pending:
+          nPending++;
+          pendingStake += s.stake;
+      }
+    }
+    final balance = won - settledStake;
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        Expanded(child: StatCard(label: 'Giocato', value: euro(played), sub: '${slips.length} schedine')),
+        const SizedBox(width: 10),
+        Expanded(child: StatCard(label: 'Vinto', value: euro(won), sub: '$nWon vinte, $nLost perse')),
+      ]),
+      const SizedBox(height: 10),
+      Row(children: [
+        Expanded(
+          child: StatCard(
+            label: 'Saldo',
+            value: '${balance >= 0 ? '+' : '−'}${euro(balance.abs())}',
+            valueColor: balance >= 0 ? C.blueText : C.warn,
+            sub: nPending > 0 ? 'esclusi ${euro(pendingStake)} in corso' : 'schedine concluse',
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: StatCard(
+            label: 'Atteso dal modello',
+            value: '${expected - settledStake >= 0 ? '+' : '−'}${euro((expected - settledStake).abs())}',
+            sub: 'sulle concluse',
+          ),
+        ),
+      ]),
+      const Padding(
+        padding: EdgeInsets.only(top: 10, left: 4),
+        child: Text(
+          '“Atteso dal modello” è quanto avresti guadagnato o perso in media giocando le stesse schedine '
+          'tante volte. Se il tuo saldo è molto più alto o più basso, la differenza è dovuta soprattutto alla fortuna.',
+          style: TextStyle(fontSize: 12, height: 1.45, color: C.grey),
+        ),
+      ),
+      const SizedBox(height: 16),
+      for (var i = 0; i < slips.length; i++)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: _SavedTile(app: app, slip: slips[i], status: statuses[i]),
+        ),
+    ]);
+  }
+}
+
+class _SavedTile extends StatelessWidget {
+  final AppState app;
+  final SavedSlip slip;
+  final (SlipStatus, List<bool?>) status;
+  const _SavedTile({required this.app, required this.slip, required this.status});
+
+  @override
+  Widget build(BuildContext context) {
+    final (st, legRes) = status;
+    final label = switch (st) {
+      SlipStatus.won => 'Vinta',
+      SlipStatus.lost => 'Persa',
+      SlipStatus.pending => 'In corso',
+    };
+    final color = switch (st) {
+      SlipStatus.won => C.blueText,
+      SlipStatus.lost => C.warn,
+      SlipStatus.pending => C.grey,
+    };
+    final bg = switch (st) {
+      SlipStatus.won => C.blueTint,
+      SlipStatus.lost => C.warnTint,
+      SlipStatus.pending => C.white,
+    };
+    final date = slip.firstDate ?? slip.savedAt;
+    final done = legRes.where((r) => r == true).length;
+    return Material(
+      color: C.fill,
+      borderRadius: BorderRadius.circular(16),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: () => _showDetail(context),
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Row(children: [
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text('${_dateShort(date)} · ${slip.legs.length} ${slip.legs.length == 1 ? 'giocata' : 'giocate'}',
+                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: C.ink)),
+                const SizedBox(height: 3),
+                Text(
+                  '${euro(slip.stake)} · quota ${_f(slip.totalOdds)} · vincita ${euro(slip.payout)}',
+                  style: const TextStyle(fontSize: 13, color: C.ink2),
+                ),
+                if (st == SlipStatus.pending)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text('$done di ${slip.legs.length} già vinte',
+                        style: const TextStyle(fontSize: 12, color: C.grey)),
+                  ),
+              ]),
+            ),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(10)),
+              child: Text(label, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: color)),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  void _showDetail(BuildContext context) {
+    final legRes = status.$2;
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: C.white,
+      showDragHandle: true,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('Schedina del ${_dateShort(slip.firstDate ?? slip.savedAt)}',
+                style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: C.ink)),
+            const SizedBox(height: 2),
+            Text('${euro(slip.stake)} · quota ${_f(slip.totalOdds)} · vincita ${euro(slip.payout)}',
+                style: const TextStyle(fontSize: 13, color: C.grey)),
+            const SizedBox(height: 14),
+            for (var i = 0; i < slip.legs.length; i++) ...[
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Row(children: [
+                  Icon(
+                    legRes[i] == null
+                        ? CupertinoIcons.clock
+                        : (legRes[i]! ? CupertinoIcons.checkmark_circle_fill : CupertinoIcons.xmark_circle_fill),
+                    size: 20,
+                    color: legRes[i] == null ? C.mid : (legRes[i]! ? C.blue : C.warn),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text('${slip.legs[i].home} – ${slip.legs[i].away}',
+                          style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: C.ink)),
+                      Text(
+                        '${slip.legs[i].selectionLabel}${_scoreText(i)}',
+                        style: const TextStyle(fontSize: 13, color: C.ink2),
+                      ),
+                    ]),
+                  ),
+                  Text(_f(slip.legs[i].odds),
+                      style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: C.ink)),
+                ]),
+              ),
+              if (i < slip.legs.length - 1) const Divider(height: 1, color: C.line),
+            ],
+            if (slip.modelProb != null && slip.modelProb! > 0)
+              Notice(
+                'Al momento del salvataggio il modello la stimava vincente circa 1 volta su '
+                '${(1 / slip.modelProb!).round()}, con un ritorno medio di ${euro((slip.expectedReturn ?? 0) * 100, 0)} '
+                'ogni 100 € giocati.',
+              ),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              child: _SecondaryButton(
+                label: slip.inCalendar ? 'Segna di nuovo sul calendario' : 'Segna sul calendario',
+                icon: CupertinoIcons.calendar_badge_plus,
+                onPressed: () async {
+                  final ok = await addSlipToCalendar(slip);
+                  if (ok) {
+                    slip.inCalendar = true;
+                    await app.saveSlip(slip);
+                  }
+                },
+              ),
+            ),
+            Center(
+              child: CupertinoButton(
+                onPressed: () async {
+                  Navigator.pop(ctx);
+                  await app.deleteSlip(slip.id);
+                },
+                child: const Text('Elimina dallo storico', style: TextStyle(color: C.warn, fontSize: 15)),
+              ),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  String _scoreText(int i) {
+    final m = app.resultFor(slip.legs[i], slip.savedAt);
+    return m == null ? '' : ' · finita ${m.hg}-${m.ag}';
   }
 }

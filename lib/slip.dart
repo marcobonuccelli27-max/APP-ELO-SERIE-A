@@ -494,3 +494,108 @@ class SlipAnalysis {
     return null;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Storico delle schedine salvate
+
+Map<String, dynamic> legToJson(Leg l) => {
+      'home': l.home,
+      'away': l.away,
+      'date': l.date?.toIso8601String(),
+      'type': l.type.name,
+      's1': l.s1,
+      's2': l.s2,
+      'line': l.line,
+      'h1': l.h1,
+      'h2': l.h2,
+      'a1': l.a1,
+      'a2': l.a2,
+      'yes': l.yes,
+      'odds': l.odds,
+    };
+
+Leg legFromJson(Map<String, dynamic> j) => Leg(
+      home: j['home'] as String? ?? '',
+      away: j['away'] as String? ?? '',
+      date: j['date'] == null ? null : DateTime.tryParse(j['date'] as String),
+      type: MarketType.values.firstWhere((t) => t.name == j['type'], orElse: () => MarketType.esito),
+      s1: j['s1'] as String? ?? '1',
+      s2: j['s2'] as String? ?? 'O',
+      line: (j['line'] as num?)?.toDouble() ?? 2.5,
+      h1: j['h1'] as int? ?? 1,
+      h2: j['h2'] as int? ?? 3,
+      a1: j['a1'] as int? ?? 0,
+      a2: j['a2'] as int? ?? 3,
+      yes: j['yes'] as bool? ?? true,
+      odds: (j['odds'] as num?)?.toDouble() ?? 0,
+      homeKnown: true,
+      awayKnown: true,
+    );
+
+enum SlipStatus { pending, won, lost }
+
+class SavedSlip {
+  final String id;
+  final DateTime savedAt;
+  final List<Leg> legs;
+  final double stake;
+  final double bonus;
+  final double? modelProb; // probabilità di vincerla secondo il modello
+  final double? expectedReturn; // ritorno medio per euro secondo il modello
+  bool inCalendar;
+
+  SavedSlip({
+    required this.id,
+    required this.savedAt,
+    required this.legs,
+    required this.stake,
+    required this.bonus,
+    this.modelProb,
+    this.expectedReturn,
+    this.inCalendar = false,
+  });
+
+  double get totalOdds => legs.fold(1.0, (a, l) => a * (l.odds > 1 ? l.odds : 1));
+
+  double get payout => stake * totalOdds + bonus;
+
+  DateTime? get firstDate {
+    DateTime? d;
+    for (final l in legs) {
+      final x = l.date;
+      if (x != null && (d == null || x.isBefore(d))) d = x;
+    }
+    return d;
+  }
+
+  DateTime? get lastDate {
+    DateTime? d;
+    for (final l in legs) {
+      final x = l.date;
+      if (x != null && (d == null || x.isAfter(d))) d = x;
+    }
+    return d;
+  }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'savedAt': savedAt.toIso8601String(),
+        'legs': legs.map(legToJson).toList(),
+        'stake': stake,
+        'bonus': bonus,
+        'modelProb': modelProb,
+        'expectedReturn': expectedReturn,
+        'inCalendar': inCalendar,
+      };
+
+  factory SavedSlip.fromJson(Map<String, dynamic> j) => SavedSlip(
+        id: j['id'] as String,
+        savedAt: DateTime.tryParse(j['savedAt'] as String? ?? '') ?? DateTime.now(),
+        legs: (j['legs'] as List<dynamic>).map((e) => legFromJson(e as Map<String, dynamic>)).toList(),
+        stake: (j['stake'] as num?)?.toDouble() ?? 0,
+        bonus: (j['bonus'] as num?)?.toDouble() ?? 0,
+        modelProb: (j['modelProb'] as num?)?.toDouble(),
+        expectedReturn: (j['expectedReturn'] as num?)?.toDouble(),
+        inCalendar: j['inCalendar'] as bool? ?? false,
+      );
+}

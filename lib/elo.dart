@@ -38,24 +38,36 @@ class MatchResult {
   int get outcome => hg > ag ? 0 : (hg == ag ? 1 : 2);
 }
 
-/// I tre parametri del motore Elo.
+/// I parametri del motore Elo.
 class EloParams {
-  final double k; // quanto si muovono i punteggi dopo ogni partita
+  final double k; // quanto si muovono i punteggi dopo ogni partita (dal girone di ritorno)
   final double home; // punti di vantaggio per chi gioca in casa
   final double regress; // quota (0-1) di riavvicinamento alla media a inizio stagione
+  final double early; // aumento di K alla prima giornata (1 = doppio), che scende fino alla 19ª
 
-  const EloParams(this.k, this.home, this.regress);
+  const EloParams(this.k, this.home, this.regress, [this.early = 0]);
 
-  static const standard = EloParams(20, 70, 0.25);
+  static const standard = EloParams(20, 70, 0.25, 0.5);
 
-  String get key => '${k.toStringAsFixed(2)}|${home.toStringAsFixed(2)}|${regress.toStringAsFixed(3)}';
+  /// Giornate su cui K scende fino al valore normale (il girone d'andata).
+  static const earlyRounds = 19;
 
-  Map<String, dynamic> toJson() => {'k': k, 'home': home, 'regress': regress};
+  /// K effettivo dopo [played] partite giocate nella stagione.
+  double kAt(double played) {
+    final f = (earlyRounds - played) / earlyRounds;
+    return k * (1 + early * (f > 0 ? f : 0));
+  }
+
+  String get key =>
+      '${k.toStringAsFixed(2)}|${home.toStringAsFixed(2)}|${regress.toStringAsFixed(3)}|${early.toStringAsFixed(2)}';
+
+  Map<String, dynamic> toJson() => {'k': k, 'home': home, 'regress': regress, 'early': early};
 
   factory EloParams.fromJson(Map<String, dynamic> j) => EloParams(
         (j['k'] as num).toDouble(),
         (j['home'] as num).toDouble(),
         (j['regress'] as num).toDouble(),
+        (j['early'] as num?)?.toDouble() ?? 0,
       );
 }
 
@@ -162,6 +174,7 @@ _SimOut _simulate(
   final last = Float64List(nt);
   final inPrev = List<bool>.filled(nt, false);
   final inCur = List<bool>.filled(nt, false);
+  final played = Int32List(nt); // partite giocate nella stagione in corso
   final diffs = Float64List(d.n);
   var cur = d.n > 0 ? d.season[0] : 0;
   final first = cur;
@@ -188,6 +201,7 @@ _SimOut _simulate(
         if (inCur[t]) r[t] = 1500 + (r[t] - 1500) * (1 - p.regress);
         inPrev[t] = inCur[t];
         inCur[t] = false;
+        played[t] = 0;
       }
       cur = d.season[i];
     }
@@ -211,7 +225,10 @@ _SimOut _simulate(
       loss += (w - we) * (w - we);
       count++;
     }
-    final delta = p.k * goalMultiplier(d.gd[i]) * (w - we);
+    final kEff = p.early == 0 ? p.k : p.kAt((played[h] + played[a]) / 2);
+    final delta = kEff * goalMultiplier(d.gd[i]) * (w - we);
+    played[h]++;
+    played[a]++;
     r[h] += delta;
     r[a] -= delta;
     last[h] = delta;
@@ -255,7 +272,9 @@ EloParams calibrate(List<MatchResult> ms, {int from = 0, int to = 1 << 30}) {
   for (var k = 10.0; k <= 40; k += 4) {
     for (var h = 20.0; h <= 120; h += 10) {
       for (final reg in [0.1, 0.2, 0.3, 0.4]) {
-        tryP(EloParams(k, h, reg));
+        for (final e in [0.0, 0.5, 1.0, 1.5, 2.0]) {
+          tryP(EloParams(k, h, reg, e));
+        }
       }
     }
   }
@@ -264,8 +283,10 @@ EloParams calibrate(List<MatchResult> ms, {int from = 0, int to = 1 << 30}) {
   for (var k = c.k - 3; k <= c.k + 3; k += 1) {
     for (var h = c.home - 8; h <= c.home + 8; h += 2) {
       for (final reg in [c.regress - 0.05, c.regress, c.regress + 0.05]) {
-        if (k < 4 || reg < 0 || reg > 0.9) continue;
-        tryP(EloParams(k, h, reg));
+        for (final e in [c.early - 0.25, c.early, c.early + 0.25]) {
+          if (k < 4 || reg < 0 || reg > 0.9 || e < 0) continue;
+          tryP(EloParams(k, h, reg, e));
+        }
       }
     }
   }
@@ -513,9 +534,11 @@ class BacktestResult {
   final int trainTo;
   final int testFrom;
   final int testTo;
+  final List<ThresholdRow> sweep; // risultati con ogni soglia da 1,00 a 1,20
   final String? error;
 
   BacktestResult({
+    this.sweep = const [],
     required this.bets,
     required this.skippedLeastLikely,
     required this.staked,
@@ -618,16 +641,11 @@ BacktestResult backtest(List<MatchResult> ms, BacktestArgs args) {
     testProbs = [for (var i = testStart; i < d.n; i++) draw.probs(sim.diffs[i])];
   }
 
-  var bets = 0, skipped = 0;
-  var staked = 0.0, profit = 0.0;
-  final returns = <double>[];
-  var clvChecked = 0, clvBeaten = 0;
+  // Partite di prova con quote, per simulare le scommesse.
+  final picks = <_TestMatch>[];
   var llModel = 0.0, llBook = 0.0;
   var nLl = 0;
   var nTest = 0;
-  final bankroll = <double>[args.budget];
-  final dates = <DateTime>[];
-
   for (var i = testStart; i < upto.length; i++) {
     final m = upto[i];
     nTest++;
@@ -639,46 +657,16 @@ BacktestResult backtest(List<MatchResult> ms, BacktestArgs args) {
       llBook += -math.log(math.max(fairProbs(ref)[o], 1e-9));
       nLl++;
     }
-    final q = m.odds;
-    if (q == null) continue;
-    var pick = 0;
-    var ev = p[0] * q[0];
-    for (var k = 1; k < 3; k++) {
-      if (p[k] * q[k] > ev) {
-        ev = p[k] * q[k];
-        pick = k;
-      }
-    }
-    if (ev < args.threshold) continue;
-    if (isLeastLikely(p, pick)) {
-      skipped++;
-      continue;
-    }
-    bets++;
-    staked += args.stake;
-    final won = pick == o;
-    final r = won ? q[pick] - 1 : -1.0;
-    returns.add(r);
-    profit += args.stake * r;
-    bankroll.add(args.budget + profit);
-    dates.add(m.date);
-    final c = m.closing;
-    if (c != null) {
-      clvChecked++;
-      if (q[pick] > c[pick]) clvBeaten++;
-    }
+    if (m.odds != null) picks.add(_TestMatch(p, o, m.odds!, m.closing, m.date));
   }
 
-  var margin = 0.0;
-  if (returns.length > 1) {
-    final mean = returns.reduce((a, b) => a + b) / returns.length;
-    var v = 0.0;
-    for (final r in returns) {
-      v += (r - mean) * (r - mean);
-    }
-    v /= (returns.length - 1);
-    margin = 2 * math.sqrt(v) / math.sqrt(returns.length);
-  }
+  final chosen = _runBets(picks, args.threshold, args.stake, args.budget, true);
+  final sweep = <ThresholdRow>[
+    for (var t = 100; t <= 120; t++) _runBets(picks, t / 100, args.stake, args.budget, false).row(t / 100)
+  ];
+  final bets = chosen.bets, skipped = chosen.skipped, staked = chosen.staked, profit = chosen.profit;
+  final margin = chosen.margin, clvChecked = chosen.clvChecked, clvBeaten = chosen.clvBeaten;
+  final bankroll = chosen.bankroll, dates = chosen.dates;
 
   return BacktestResult(
     bets: bets,
@@ -702,5 +690,103 @@ BacktestResult backtest(List<MatchResult> ms, BacktestArgs args) {
     trainTo: trainTo,
     testFrom: testFrom,
     testTo: testTo,
+    sweep: sweep,
   );
+}
+
+class _TestMatch {
+  final List<double> p;
+  final int outcome;
+  final List<double> odds;
+  final List<double>? closing;
+  final DateTime date;
+  _TestMatch(this.p, this.outcome, this.odds, this.closing, this.date);
+}
+
+class _BetStats {
+  int bets = 0, skipped = 0, clvChecked = 0, clvBeaten = 0;
+  double staked = 0, profit = 0, margin = 0;
+  final List<double> bankroll = [];
+  final List<DateTime> dates = [];
+
+  ThresholdRow row(double t) => ThresholdRow(
+        threshold: t,
+        bets: bets,
+        profit: profit,
+        roi: staked > 0 ? profit / staked : 0,
+        margin: margin,
+        clvChecked: clvChecked,
+        clvBeaten: clvBeaten,
+      );
+}
+
+/// Simula le scommesse con una certa soglia di valore.
+_BetStats _runBets(List<_TestMatch> ms, double threshold, double stake, double budget, bool series) {
+  final st = _BetStats();
+  if (series) st.bankroll.add(budget);
+  final returns = <double>[];
+  for (final m in ms) {
+    final p = m.p, q = m.odds;
+    var pick = 0;
+    var ev = p[0] * q[0];
+    for (var k = 1; k < 3; k++) {
+      if (p[k] * q[k] > ev) {
+        ev = p[k] * q[k];
+        pick = k;
+      }
+    }
+    if (ev < threshold) continue;
+    if (isLeastLikely(p, pick)) {
+      st.skipped++;
+      continue;
+    }
+    st.bets++;
+    st.staked += stake;
+    final r = pick == m.outcome ? q[pick] - 1 : -1.0;
+    returns.add(r);
+    st.profit += stake * r;
+    if (series) {
+      st.bankroll.add(budget + st.profit);
+      st.dates.add(m.date);
+    }
+    final c = m.closing;
+    if (c != null) {
+      st.clvChecked++;
+      if (q[pick] > c[pick]) st.clvBeaten++;
+    }
+  }
+  if (returns.length > 1) {
+    final mean = returns.reduce((a, b) => a + b) / returns.length;
+    var v = 0.0;
+    for (final r in returns) {
+      v += (r - mean) * (r - mean);
+    }
+    v /= (returns.length - 1);
+    st.margin = 2 * math.sqrt(v) / math.sqrt(returns.length);
+  }
+  return st;
+}
+
+/// Risultato della verifica con una certa soglia.
+class ThresholdRow {
+  final double threshold;
+  final int bets;
+  final double profit;
+  final double roi;
+  final double margin;
+  final int clvChecked;
+  final int clvBeaten;
+
+  const ThresholdRow({
+    required this.threshold,
+    required this.bets,
+    required this.profit,
+    required this.roi,
+    required this.margin,
+    required this.clvChecked,
+    required this.clvBeaten,
+  });
+
+  double get clvShare => clvChecked == 0 ? 0 : clvBeaten / clvChecked;
+  double get lowerBound => roi - margin; // caso sfavorevole: ROI meno il margine
 }

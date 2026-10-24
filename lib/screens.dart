@@ -12,6 +12,12 @@ import 'widgets.dart';
 
 const _pagePadding = EdgeInsets.fromLTRB(20, 16, 20, 40);
 
+/// K lungo la stagione, per esempio "K 30 alla 1ª giornata, 25 alla 10ª, 20 dalla 19ª".
+String kCurve(EloParams p) {
+  if (p.early == 0) return 'K ${fmt(p.k, 0)} fisso';
+  return 'K ${fmt(p.kAt(0), 0)} alla 1ª giornata, ${fmt(p.kAt(9), 0)} alla 10ª, ${fmt(p.k, 0)} dalla 19ª';
+}
+
 // ===========================================================================
 // Giornata
 
@@ -603,7 +609,7 @@ class _EloList extends StatelessWidget {
         child: Text(
           'La freccia indica la variazione dall’inizio della stagione; le caselle sono le ultime 5 partite '
           '(V vinta, N pareggiata, P persa). Tocca una squadra per vedere l’andamento del punteggio. '
-          'Calcolato con K ${fmt(p.k, 0)}, casa +${fmt(p.home, 0)}, riavvicinamento ${fmt(p.regress * 100, 0)}%.',
+          'Calcolato con ${kCurve(p)}; casa +${fmt(p.home, 0)}, riavvicinamento ${fmt(p.regress * 100, 0)}%.',
           style: const TextStyle(fontSize: 12, height: 1.45, color: C.grey),
         ),
       ),
@@ -1053,7 +1059,7 @@ class _VerificaScreenState extends State<VerificaScreen> {
                             '(dal ${seasonLabel(app.settings.calibFrom)}), fermandosi prima delle stagioni di prova.'
                         : m == 'dc'
                             ? 'Usa la tua emivita: ${fmt(app.settings.dcHalfLife, 0)} giorni.'
-                            : 'Usa i tuoi valori: K ${fmt(app.settings.k, 0)}, casa +${fmt(app.settings.home, 0)}, '
+                            : 'Usa i tuoi valori: ${kCurve(app.settings.manualParams)}; casa +${fmt(app.settings.home, 0)}, '
                                 'riavvicinamento ${fmt(app.settings.regress * 100, 0)}%.') +
                     (m == 'dc' ? ' Con Dixon-Coles la verifica può richiedere fino a un paio di minuti.' : ''),
                 style: const TextStyle(fontSize: 12, height: 1.4, color: C.grey),
@@ -1150,12 +1156,26 @@ class _VerificaScreenState extends State<VerificaScreen> {
         ]),
       ),
       Notice(verdict.$2, title: verdict.$1, tone: verdict.$3),
+      if (r.sweep.isNotEmpty)
+        _BestThresholds(
+          r: r,
+          current: thr ?? app.settings.threshold,
+          onUse: (t) {
+            setState(() => thr = t);
+            app.settings.threshold = t;
+            app.saveSettings();
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text('Soglia impostata a ${fmt(t)}: vale anche per la schermata Giornata. '
+                  'Premi “Avvia verifica” per rivedere i risultati.'),
+            ));
+          },
+        ),
       Padding(
         padding: const EdgeInsets.only(top: 12, left: 4),
         child: Text(
           '${r.model == 'dc' ? 'Dixon-Coles' : 'Elo'}, '
           '${r.manual ? 'con i tuoi valori' : 'calibrato su ${seasonLabel(r.trainFrom)}–${seasonLabel(r.trainTo)}'}: '
-          '${r.model == 'dc' ? 'emivita ${fmt(r.halfLife, 0)} giorni' : 'K ${fmt(r.params.k, 0)}, casa +${fmt(r.params.home, 0)}, riavvicinamento ${fmt(r.params.regress * 100, 0)}%'}. '
+          '${r.model == 'dc' ? 'emivita ${fmt(r.halfLife, 0)} giorni' : '${kCurve(r.params)}; casa +${fmt(r.params.home, 0)}, riavvicinamento ${fmt(r.params.regress * 100, 0)}%'}. '
           'Provato su ${seasonLabel(r.testFrom)}–${seasonLabel(r.testTo)} con le quote Bet365 '
           '(o la media dei bookmaker) disponibili prima delle partite. '
           '${r.skippedLeastLikely > 0 ? 'Scartate ${r.skippedLeastLikely} giocate perché sull’esito meno probabile.' : ''}',
@@ -1225,6 +1245,144 @@ class _VerificaScreenState extends State<VerificaScreen> {
   }
 }
 
+/// Le soglie migliori per ciascun criterio, più la tabella di tutte le soglie.
+class _BestThresholds extends StatelessWidget {
+  final BacktestResult r;
+  final double current;
+  final ValueChanged<double> onUse;
+  const _BestThresholds({required this.r, required this.current, required this.onUse});
+
+  static const minBets = 30;
+
+  ThresholdRow? _best(bool Function(ThresholdRow) ok, double Function(ThresholdRow) score) {
+    ThresholdRow? b;
+    for (final row in r.sweep) {
+      if (!ok(row)) continue;
+      if (b == null || score(row) > score(b)) b = row;
+    }
+    return b;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final byProfit = _best((x) => x.bets > 0, (x) => x.profit);
+    final byRoi = _best((x) => x.bets >= minBets, (x) => x.roi);
+    final byClv = _best((x) => x.clvChecked >= minBets, (x) => x.clvShare);
+    final bySafe = _best((x) => x.bets >= minBets, (x) => x.lowerBound);
+    final picks = <(String, String, ThresholdRow?, String Function(ThresholdRow))>[
+      ('Guadagno totale', 'Quella che avrebbe fatto guadagnare (o perdere meno) più euro.', byProfit,
+          (x) => '${signedEuro(x.profit)} con ${x.bets} giocate'),
+      ('ROI', 'Quella con il miglior guadagno in percentuale sul puntato, con almeno $minBets giocate.', byRoi,
+          (x) => '${signedPct(x.roi)} su ${x.bets} giocate'),
+      ('Quote poi scese', 'Quella in cui il modello ha anticipato più spesso il mercato, con almeno $minBets giocate.',
+          byClv, (x) => '${pct(x.clvShare)} di ${x.clvChecked} giocate'),
+      ('Più prudente', 'Quella con il risultato migliore anche nel caso sfavorevole (ROI meno il margine dovuto al caso).',
+          bySafe, (x) => 'nel caso sfavorevole ${signedPct(x.lowerBound)}'),
+    ];
+    final allNegative = byProfit != null && byProfit.profit < 0;
+    final distinct = {for (final p in picks) if (p.$3 != null) p.$3!.threshold}.length;
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      const SizedBox(height: 22),
+      const Text('Soglia migliore', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: C.ink)),
+      const SizedBox(height: 4),
+      const Text('Provate tutte le soglie da 1,00 a 1,20 sulle stesse stagioni.',
+          style: TextStyle(fontSize: 13, color: C.grey)),
+      const SizedBox(height: 10),
+      for (final p in picks)
+        Container(
+          margin: const EdgeInsets.only(bottom: 10),
+          padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
+          decoration: BoxDecoration(color: C.fill, borderRadius: BorderRadius.circular(14)),
+          child: Row(children: [
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(p.$1, style: const TextStyle(fontSize: 13, color: C.grey)),
+                const SizedBox(height: 2),
+                Text(
+                  p.$3 == null ? 'Troppe poche giocate' : fmt(p.$3!.threshold),
+                  style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: C.ink),
+                ),
+                if (p.$3 != null)
+                  Text(p.$4(p.$3!), style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: C.ink2)),
+                const SizedBox(height: 3),
+                Text(p.$2, style: const TextStyle(fontSize: 12, height: 1.35, color: C.grey)),
+              ]),
+            ),
+            if (p.$3 != null)
+              CupertinoButton(
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                onPressed: (p.$3!.threshold - current).abs() < 0.001 ? null : () => onUse(p.$3!.threshold),
+                child: Text((p.$3!.threshold - current).abs() < 0.001 ? 'In uso' : 'Usa',
+                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+              ),
+          ]),
+        ),
+      if (allNegative)
+        const Notice(
+          'Con nessuna soglia il modello avrebbe guadagnato su queste stagioni: la soglia “migliore” è solo quella che perde meno.',
+          tone: Tone.warning,
+        ),
+      Notice(
+        'Scegliere la soglia guardando le stesse stagioni su cui la misuri fa sembrare i risultati migliori di quanto siano: '
+        'provando 21 soglie, una fortunata salta fuori quasi sempre. Per controllare, cambia le stagioni di prova '
+        '(per esempio “Ultima” invece di “Ultime 3”) e guarda se la soglia resta buona. '
+        '${distinct >= 3 ? 'Qui i criteri indicano soglie molto diverse: è un segno che nessuna è davvero migliore delle altre. ' : ''}'
+        'L’errore non compare perché non dipende dalla soglia: misura le probabilità, non quali scommesse fai.',
+        title: 'Attenzione al caso',
+      ),
+      const SizedBox(height: 14),
+      const Text('Tutte le soglie', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: C.ink)),
+      const SizedBox(height: 8),
+      _SweepTable(rows: r.sweep, current: current),
+    ]);
+  }
+}
+
+class _SweepTable extends StatelessWidget {
+  final List<ThresholdRow> rows;
+  final double current;
+  const _SweepTable({required this.rows, required this.current});
+
+  @override
+  Widget build(BuildContext context) {
+    const head = TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: C.grey);
+    const cell = TextStyle(fontSize: 13, color: C.ink, fontFeatures: [FontFeature.tabularFigures()]);
+    Widget c(String t, TextStyle st, double w) => SizedBox(width: w, child: Text(t, style: st, textAlign: TextAlign.right));
+    return Container(
+      decoration: BoxDecoration(color: C.fill, borderRadius: BorderRadius.circular(14)),
+      clipBehavior: Clip.antiAlias,
+      child: Column(children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+          child: Row(children: [
+            c('Soglia', head, 46),
+            const Spacer(),
+            c('Giocate', head, 52),
+            c('Risultato', head, 76),
+            c('ROI', head, 58),
+            c('Scese', head, 46),
+          ]),
+        ),
+        const Divider(height: 1, color: C.line),
+        for (final x in rows)
+          Container(
+            color: (x.threshold - current).abs() < 0.001 ? C.blueTint : null,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+            child: Row(children: [
+              c(fmt(x.threshold), cell.copyWith(fontWeight: FontWeight.w600), 46),
+              const Spacer(),
+              c('${x.bets}', cell, 52),
+              c(x.bets == 0 ? '—' : signedEuro(x.profit), cell.copyWith(color: x.profit < 0 ? C.warn : C.ink), 76),
+              c(x.bets == 0 ? '—' : signedPct(x.roi), cell, 58),
+              c(x.clvChecked == 0 ? '—' : pct(x.clvShare), cell, 46),
+            ]),
+          ),
+      ]),
+    );
+  }
+}
+
 class _Explain extends StatelessWidget {
   final String title;
   final String text;
@@ -1259,6 +1417,7 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
   final k = TextEditingController();
   final home = TextEditingController();
   final regress = TextEditingController();
+  final early = TextEditingController();
   final halfLife = TextEditingController();
   bool _ready = false;
 
@@ -1273,13 +1432,14 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
     k.text = fmt(s.k, 0);
     home.text = fmt(s.home, 0);
     regress.text = fmt(s.regress * 100, 0);
+    early.text = fmt(s.early * 100, 0);
     halfLife.text = fmt(s.dcHalfLife, 0);
     _ready = true;
   }
 
   @override
   void dispose() {
-    for (final c in [apiKey, budget, threshold, k, home, regress, halfLife]) {
+    for (final c in [apiKey, budget, threshold, k, home, regress, early, halfLife]) {
       c.dispose();
     }
     super.dispose();
@@ -1491,13 +1651,28 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
               if (!s.autoCalib) ...[
                 SettingRow(
                   label: 'Fattore K',
-                  sub: 'Di solito tra 15 e 30',
+                  sub: 'Dal girone di ritorno; di solito tra 15 e 30',
                   trailing: SmallField(
                     controller: k,
                     onChanged: (v) {
                       final n = _num(v);
                       if (n != null && n > 0 && n <= 100) {
                         s.k = n;
+                        save();
+                      }
+                    },
+                  ),
+                ),
+                SettingRow(
+                  label: 'K in più a inizio stagione',
+                  sub: 'Alla 1ª giornata, poi scende fino alla 19ª. 0% = K fisso',
+                  trailing: SmallField(
+                    controller: early,
+                    suffix: '%',
+                    onChanged: (v) {
+                      final n = _num(v);
+                      if (n != null && n >= 0 && n <= 400) {
+                        s.early = n / 100;
                         save();
                       }
                     },
@@ -1551,11 +1726,8 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
                 ),
               SettingRow(
                 label: 'Valori in uso',
-                sub: s.model == 'dc' ? 'Emivita Dixon-Coles: ${fmt(app.halfLifeInUse, 0)} giorni' : null,
-                trailing: Text(
-                  'K ${fmt(p.k, 0)} · casa +${fmt(p.home, 0)} · ${fmt(p.regress * 100, 0)}%',
-                  style: const TextStyle(fontSize: 14, color: C.grey),
-                ),
+                sub: '${kCurve(p)}. Vantaggio casa +${fmt(p.home, 0)}, riavvicinamento estivo ${fmt(p.regress * 100, 0)}%.'
+                    '${s.model == 'dc' ? ' Emivita Dixon-Coles: ${fmt(app.halfLifeInUse, 0)} giorni.' : ''}',
               ),
               Padding(
                 padding: const EdgeInsets.all(10),

@@ -21,6 +21,7 @@ class Settings {
   double k;
   double home;
   double regress;
+  double early; // aumento di K a inizio stagione (1 = doppio)
   int calibFrom; // prima stagione usata per calibrare
   int calibTo; // ultima stagione usata per calibrare; 0 = l'ultima completa
   String model; // 'elo' oppure 'dc' (Dixon-Coles)
@@ -37,6 +38,7 @@ class Settings {
     this.k = 20,
     this.home = 70,
     this.regress = 0.25,
+    this.early = 0.5,
     this.calibFrom = firstSeason,
     this.calibTo = 0,
     this.model = 'elo',
@@ -46,7 +48,7 @@ class Settings {
 
   double get stake => budget * stakePct / 100;
 
-  EloParams get manualParams => EloParams(k, home, regress);
+  EloParams get manualParams => EloParams(k, home, regress, early);
 
   /// Ultima stagione di calibrazione effettiva.
   int calibToFor(int currentSeason) => calibTo == 0 ? currentSeason - 1 : calibTo;
@@ -61,6 +63,7 @@ class Settings {
         'k': k,
         'home': home,
         'regress': regress,
+        'early': early,
         'calibFrom': calibFrom,
         'calibTo': calibTo,
         'model': model,
@@ -80,6 +83,7 @@ class Settings {
       k: n('k', 20),
       home: n('home', 70),
       regress: n('regress', 0.25),
+      early: n('early', 0.5),
       calibFrom: j['calibFrom'] as int? ?? firstSeason,
       calibTo: j['calibTo'] as int? ?? 0,
       model: j['model'] as String? ?? 'elo',
@@ -289,15 +293,19 @@ class AppState extends ChangeNotifier {
   String? error;
   String? oddsError;
 
+  List<SavedSlip> savedSlips = [];
+
   List<MatchResult>? _history;
   int _historyVersion = 0;
+  Map<String, List<MatchResult>> _byTeams = {};
   EloHistoryData? _eloHistory;
   String? _eloHistoryKey;
   final Map<int, Future<SeasonView>> _views = {};
 
   int get currentSeason => currentSeasonStart(DateTime.now());
 
-  String _calibKey(int cur) => '${settings.calibFrom}-${settings.calibToFor(cur)}-$cur';
+  // "k2": la calibrazione include anche il K variabile a inizio stagione.
+  String _calibKey(int cur) => 'k2-${settings.calibFrom}-${settings.calibToFor(cur)}-$cur';
 
   EloParams get paramsInUse =>
       settings.autoCalib ? (calibrated ?? EloParams.standard) : settings.manualParams;
@@ -340,6 +348,11 @@ class AppState extends ChangeNotifier {
       } catch (_) {}
     }
     try {
+      savedSlips = (await repo.loadSlips())
+          .map((e) => SavedSlip.fromJson(e as Map<String, dynamic>))
+          .toList();
+    } catch (_) {}
+    try {
       _setHistory(await repo.loadHistory(currentSeason: currentSeason, onProgress: (_) {}, offline: true));
     } catch (_) {}
     notifyListeners();
@@ -349,6 +362,52 @@ class AppState extends ChangeNotifier {
     _history = h;
     _historyVersion++;
     _views.clear();
+    final idx = <String, List<MatchResult>>{};
+    for (final m in h) {
+      (idx['${m.home}|${m.away}'] ??= []).add(m);
+    }
+    _byTeams = idx;
+  }
+
+  /// Risultato vero di una giocata, se la partita è già nei dati.
+  MatchResult? resultFor(Leg leg, DateTime savedAt) {
+    final list = _byTeams['${leg.home}|${leg.away}'];
+    if (list == null) return null;
+    final d = leg.date;
+    for (final m in list) {
+      if (d != null) {
+        if (m.date.difference(d).inHours.abs() <= 72) return m;
+      } else {
+        final diff = m.date.difference(savedAt).inDays;
+        if (diff >= -1 && diff <= 60) return m;
+      }
+    }
+    return null;
+  }
+
+  /// Stato della schedina ed esito di ogni giocata (null = non ancora giocata).
+  (SlipStatus, List<bool?>) statusOf(SavedSlip s) {
+    final res = <bool?>[];
+    for (final l in s.legs) {
+      final m = resultFor(l, s.savedAt);
+      res.add(m == null ? null : l.wins(m.hg, m.ag));
+    }
+    if (res.any((r) => r == false)) return (SlipStatus.lost, res);
+    if (res.every((r) => r == true)) return (SlipStatus.won, res);
+    return (SlipStatus.pending, res);
+  }
+
+  Future<void> saveSlip(SavedSlip s) async {
+    savedSlips.removeWhere((x) => x.id == s.id);
+    savedSlips.insert(0, s);
+    await repo.saveSlips(savedSlips.map((x) => x.toJson()).toList());
+    notifyListeners();
+  }
+
+  Future<void> deleteSlip(String id) async {
+    savedSlips.removeWhere((x) => x.id == id);
+    await repo.saveSlips(savedSlips.map((x) => x.toJson()).toList());
+    notifyListeners();
   }
 
   Future<void> saveSettings() async {

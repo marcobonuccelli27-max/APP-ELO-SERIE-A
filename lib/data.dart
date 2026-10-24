@@ -388,6 +388,21 @@ class DataRepo {
     return OddsFetch(out, remaining, used);
   }
 
+  Future<File> _slipsFile() async => File('${(await _dir()).path}/schedine.json');
+
+  Future<void> saveSlips(List<Map<String, dynamic>> list) async =>
+      (await _slipsFile()).writeAsString(jsonEncode(list));
+
+  Future<List<dynamic>> loadSlips() async {
+    try {
+      final f = await _slipsFile();
+      if (!await f.exists()) return [];
+      return jsonDecode(await f.readAsString()) as List<dynamic>;
+    } catch (_) {
+      return [];
+    }
+  }
+
   Future<File> _snapshotFile() async => File('${(await _dir()).path}/snapshot.json');
 
   Future<void> saveSnapshot(Map<String, dynamic> j) async =>
