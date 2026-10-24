@@ -24,14 +24,22 @@ class Fixture {
   final String home;
   final String away;
   final Map<String, List<double>> books; // bookmaker -> [1, X, 2]
+  final Map<String, List<double>> ouBooks; // bookmaker -> [over 2,5, under 2,5]
 
-  Fixture({required this.date, required this.home, required this.away, required this.books});
+  Fixture({
+    required this.date,
+    required this.home,
+    required this.away,
+    required this.books,
+    Map<String, List<double>>? ouBooks,
+  }) : ouBooks = ouBooks ?? {};
 }
 
 class OddsFetch {
   final List<Fixture> fixtures;
-  final int? remaining; // richieste rimaste (solo The Odds API)
-  OddsFetch(this.fixtures, this.remaining);
+  final int? remaining; // richieste rimaste nel mese (solo The Odds API)
+  final int? used; // richieste già usate nel mese (solo The Odds API)
+  OddsFetch(this.fixtures, this.remaining, [this.used]);
 }
 
 class DataException implements Exception {
@@ -91,6 +99,13 @@ class _Row {
     if (x == null || y == null || z == null) return null;
     if (x <= 1 || y <= 1 || z <= 1) return null;
     return [x, y, z];
+  }
+
+  /// Due quote valide (over e under), oppure null.
+  List<double>? pair(String a, String b) {
+    final x = d(a), y = d(b);
+    if (x == null || y == null || x <= 1 || y <= 1) return null;
+    return [x, y];
   }
 }
 
@@ -292,7 +307,20 @@ class DataRepo {
       });
       final avg = r.odds('AvgH', 'AvgD', 'AvgA');
       if (books.isEmpty && avg != null) books['Media bookmaker'] = avg;
-      out.add(Fixture(date: parseFdDate(r.s('Date'), r.s('Time')), home: home, away: away, books: books));
+      final ou = <String, List<double>>{};
+      final b365 = r.pair('B365>2.5', 'B365<2.5');
+      if (b365 != null) ou['Bet365'] = b365;
+      final pin = r.pair('P>2.5', 'P<2.5');
+      if (pin != null) ou['Pinnacle'] = pin;
+      final avgOu = r.pair('Avg>2.5', 'Avg<2.5');
+      if (ou.isEmpty && avgOu != null) ou['Media bookmaker'] = avgOu;
+      out.add(Fixture(
+        date: parseFdDate(r.s('Date'), r.s('Time')),
+        home: home,
+        away: away,
+        books: books,
+        ouBooks: ou,
+      ));
     }
     return OddsFetch(out, null);
   }
@@ -317,7 +345,8 @@ class DataRepo {
     if (res.statusCode != 200) {
       throw DataException('The Odds API ha risposto con un errore (${res.statusCode}).');
     }
-    final remaining = int.tryParse(res.headers['x-requests-remaining'] ?? '');
+    final remaining = double.tryParse(res.headers['x-requests-remaining'] ?? '')?.round();
+    final used = double.tryParse(res.headers['x-requests-used'] ?? '')?.round();
     final data = jsonDecode(utf8.decode(res.bodyBytes)) as List<dynamic>;
     final out = <Fixture>[];
     for (final e in data) {
@@ -356,7 +385,7 @@ class DataRepo {
         books: books,
       ));
     }
-    return OddsFetch(out, remaining);
+    return OddsFetch(out, remaining, used);
   }
 
   Future<File> _snapshotFile() async => File('${(await _dir()).path}/snapshot.json');

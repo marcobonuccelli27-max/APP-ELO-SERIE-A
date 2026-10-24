@@ -1,9 +1,11 @@
-// Motore Elo: punteggi, calibrazione, modello 1X2 e verifica sul passato.
+// Motore Elo: punteggi, calibrazione, modello 1X2, storico e verifica sul passato.
 // Tutto qui dentro è puro calcolo, senza interfaccia: gira in un isolate
 // separato così l'app non si blocca durante i calcoli.
 
 import 'dart:math' as math;
 import 'dart:typed_data';
+
+import 'dc.dart';
 
 /// Una partita giocata, letta dai file di football-data.co.uk.
 class MatchResult {
@@ -46,6 +48,8 @@ class EloParams {
 
   static const standard = EloParams(20, 70, 0.25);
 
+  String get key => '${k.toStringAsFixed(2)}|${home.toStringAsFixed(2)}|${regress.toStringAsFixed(3)}';
+
   Map<String, dynamic> toJson() => {'k': k, 'home': home, 'regress': regress};
 
   factory EloParams.fromJson(Map<String, dynamic> j) => EloParams(
@@ -69,6 +73,14 @@ double goalMultiplier(int goalDiff) {
   return (11 + g) / 8.0;
 }
 
+/// Vero se l'esito [k] è il meno probabile dei tre.
+bool isLeastLikely(List<double> p, int k) {
+  for (var j = 0; j < 3; j++) {
+    if (j != k && p[j] <= p[k]) return false;
+  }
+  return true;
+}
+
 /// Modello che trasforma la differenza Elo in probabilità 1, X, 2
 /// (regressione logistica ordinale).
 class DrawModel {
@@ -87,14 +99,6 @@ class DrawModel {
     final s2 = _sig(t2 - b * d);
     return [1.0 - s2, s2 - s1, s1];
   }
-
-  Map<String, dynamic> toJson() => {'t1': t1, 't2': t2, 'b': b};
-
-  factory DrawModel.fromJson(Map<String, dynamic> j) => DrawModel(
-        (j['t1'] as num).toDouble(),
-        (j['t2'] as num).toDouble(),
-        (j['b'] as num).toDouble(),
-      );
 }
 
 /// Partite convertite in numeri, per calcoli veloci.
@@ -132,16 +136,27 @@ class _SimOut {
   final Float64List diffs; // differenza prima di ogni partita
   final Float64List ratings; // punteggi finali
   final Float64List lastDelta; // variazione nell'ultima partita
-  final double loss; // errore medio (Brier) escluso il primo anno
+  final double loss; // errore medio (Brier) nelle stagioni scelte
+  final int lossCount;
   final double baselineEnd; // media delle ultime 3 dell'ultima stagione
   final List<int> lastSeasonTeams;
 
-  _SimOut(this.diffs, this.ratings, this.lastDelta, this.loss, this.baselineEnd,
+  _SimOut(this.diffs, this.ratings, this.lastDelta, this.loss, this.lossCount, this.baselineEnd,
       this.lastSeasonTeams);
 }
 
 /// Fa scorrere il motore Elo su tutte le partite, in ordine.
-_SimOut _simulate(_Prepared d, EloParams p) {
+/// L'errore viene misurato solo sulle stagioni da [lossFrom] a [lossTo].
+/// Con [rec] registra il punteggio di ogni squadra dopo ogni partita
+/// (indice negativo = punteggio di partenza a inizio stagione).
+_SimOut _simulate(
+  _Prepared d,
+  EloParams p, {
+  int lossFrom = 0,
+  int lossTo = 1 << 30,
+  List<List<int>>? recI,
+  List<List<double>>? rec,
+}) {
   final nt = d.teams.length;
   final r = Float64List(nt)..fillRange(0, nt, 1500);
   final last = Float64List(nt);
@@ -181,6 +196,10 @@ _SimOut _simulate(_Prepared d, EloParams p) {
       if (!inCur[t]) {
         inCur[t] = true;
         if (cur != first && !inPrev[t]) r[t] = baseline; // neopromossa
+        if (rec != null) {
+          rec[t].add(r[t]);
+          recI![t].add(-(i + 1));
+        }
       }
     }
     final diff = r[h] + p.home - r[a];
@@ -188,7 +207,7 @@ _SimOut _simulate(_Prepared d, EloParams p) {
     final we = expectedScore(diff);
     final o = d.outc[i];
     final w = o == 0 ? 1.0 : (o == 1 ? 0.5 : 0.0);
-    if (cur != first) {
+    if (cur != first && cur >= lossFrom && cur <= lossTo) {
       loss += (w - we) * (w - we);
       count++;
     }
@@ -197,24 +216,35 @@ _SimOut _simulate(_Prepared d, EloParams p) {
     r[a] -= delta;
     last[h] = delta;
     last[a] = -delta;
+    if (rec != null) {
+      rec[h].add(r[h]);
+      recI![h].add(i);
+      rec[a].add(r[a]);
+      recI![a].add(i);
+    }
   }
 
   final lastTeams = <int>[];
   for (var t = 0; t < nt; t++) {
     if (inCur[t]) lastTeams.add(t);
   }
-  return _SimOut(diffs, r, last, count > 0 ? loss / count : 1, bottom3(), lastTeams);
+  return _SimOut(diffs, r, last, count > 0 ? loss / count : 1, count, bottom3(), lastTeams);
 }
 
-/// Cerca i parametri che avrebbero previsto meglio le partite passate.
-EloParams calibrate(List<MatchResult> ms) {
-  if (ms.length < 800) return EloParams.standard;
-  final d = _Prepared(ms);
+/// Cerca i parametri che avrebbero previsto meglio le partite delle stagioni
+/// da [from] a [to] (gli anni sono quelli di inizio stagione).
+EloParams calibrate(List<MatchResult> ms, {int from = 0, int to = 1 << 30}) {
+  final sub = ms.where((m) => m.season <= to).toList();
+  if (sub.isEmpty) return EloParams.standard;
+  final d = _Prepared(sub);
+  if (_simulate(d, EloParams.standard, lossFrom: from, lossTo: to).lossCount < 300) {
+    return EloParams.standard;
+  }
   EloParams best = EloParams.standard;
   var bestLoss = double.infinity;
 
   void tryP(EloParams p) {
-    final l = _simulate(d, p).loss;
+    final l = _simulate(d, p, lossFrom: from, lossTo: to).loss;
     if (l < bestLoss) {
       bestLoss = l;
       best = p;
@@ -279,12 +309,22 @@ DrawModel fitDrawModel(List<double> diffs, List<int> outc) {
   return DrawModel(t1, t2, b);
 }
 
+DrawModel _fitDrawOn(_Prepared d, _SimOut sim, int from, int to) {
+  final first = d.n > 0 ? d.season[0] : 0;
+  final dl = <double>[];
+  final ol = <int>[];
+  for (var i = 0; i < d.n; i++) {
+    final s = d.season[i];
+    if (s == first || s < from || s > to) continue;
+    dl.add(sim.diffs[i]);
+    ol.add(d.outc[i]);
+  }
+  return fitDrawModel(dl, ol);
+}
+
 /// Il modello pronto per la stagione in corso.
 class LiveModel {
   final Map<String, double> ratings;
-  final Map<String, double> lastDelta;
-  final Map<String, List<String>> form; // ultime 5: V, N, P
-  final List<String> seasonTeams;
   final DrawModel draw;
   final EloParams params;
   final double baseline; // punteggio per una squadra sconosciuta (neopromossa)
@@ -292,9 +332,6 @@ class LiveModel {
 
   LiveModel({
     required this.ratings,
-    required this.lastDelta,
-    required this.form,
-    required this.seasonTeams,
     required this.draw,
     required this.params,
     required this.baseline,
@@ -302,62 +339,161 @@ class LiveModel {
   });
 }
 
-LiveModel buildLive(List<MatchResult> ms, EloParams p, int currentSeason) {
+LiveModel buildLive(List<MatchResult> ms, EloParams p, int currentSeason,
+    {int drawFrom = 0, int drawTo = 1 << 30}) {
   final d = _Prepared(ms);
   final sim = _simulate(d, p);
-  final first = ms.first.season;
-  final dl = <double>[];
-  final ol = <int>[];
-  for (var i = 0; i < d.n; i++) {
-    if (d.season[i] == first) continue;
-    dl.add(sim.diffs[i]);
-    ol.add(d.outc[i]);
-  }
-  final draw = fitDrawModel(dl, ol);
+  final draw = _fitDrawOn(d, sim, drawFrom, drawTo);
 
   final ratings = <String, double>{};
-  final lastDelta = <String, double>{};
   for (var t = 0; t < d.teams.length; t++) {
     ratings[d.teams[t]] = sim.ratings[t];
-    lastDelta[d.teams[t]] = sim.lastDelta[t];
   }
   final lastSeason = ms.last.season;
-  final seasonTeams = sim.lastSeasonTeams.map((t) => d.teams[t]).toList();
-  final form = <String, List<String>>{};
   var baseline = sim.baselineEnd;
-
   if (currentSeason > lastSeason) {
     // La nuova stagione non è ancora nei dati: applico il passaggio di stagione.
-    for (final t in seasonTeams) {
-      ratings[t] = 1500 + (ratings[t]! - 1500) * (1 - p.regress);
-      lastDelta[t] = 0;
+    for (final t in sim.lastSeasonTeams) {
+      final name = d.teams[t];
+      ratings[name] = 1500 + (ratings[name]! - 1500) * (1 - p.regress);
     }
     baseline = 1500 + (baseline - 1500) * (1 - p.regress);
-  } else {
-    for (final m in ms) {
-      if (m.season != lastSeason) continue;
-      final o = m.outcome;
-      (form[m.home] ??= []).add(o == 0 ? 'V' : (o == 1 ? 'N' : 'P'));
-      (form[m.away] ??= []).add(o == 2 ? 'V' : (o == 1 ? 'N' : 'P'));
-    }
-    form.updateAll((k, v) => v.length > 5 ? v.sublist(v.length - 5) : v);
   }
+  return LiveModel(ratings: ratings, draw: draw, params: p, baseline: baseline, dataSeason: lastSeason);
+}
 
-  return LiveModel(
-    ratings: ratings,
-    lastDelta: lastDelta,
-    form: form,
-    seasonTeams: seasonTeams,
-    draw: draw,
-    params: p,
-    baseline: baseline,
-    dataSeason: lastSeason,
-  );
+// ---------------------------------------------------------------------------
+// Storico dei punteggi e classifiche
+
+/// Andamento del punteggio di una squadra: un punto dopo ogni partita,
+/// più un punto di partenza all'inizio di ogni stagione.
+class TeamSeries {
+  final List<int> t; // data in millisecondi
+  final List<double> r; // punteggio
+  final List<int> s; // stagione
+  TeamSeries(this.t, this.r, this.s);
+
+  List<double> seasonValues(int season) => [
+        for (var i = 0; i < r.length; i++)
+          if (s[i] == season) r[i]
+      ];
+
+  List<int> seasonTimes(int season) => [
+        for (var i = 0; i < t.length; i++)
+          if (s[i] == season) t[i]
+      ];
+}
+
+/// Storico completo calcolato con certi parametri.
+EloHistoryData buildHistory(List<MatchResult> ms, EloParams p) {
+  final d = _Prepared(ms);
+  final nt = d.teams.length;
+  final recI = List.generate(nt, (_) => <int>[]);
+  final rec = List.generate(nt, (_) => <double>[]);
+  _simulate(d, p, recI: recI, rec: rec);
+  final out = <String, TeamSeries>{};
+  for (var t = 0; t < nt; t++) {
+    final times = <int>[], seasons = <int>[];
+    for (final idx in recI[t]) {
+      final i = idx < 0 ? -idx - 1 : idx;
+      final m = ms[i];
+      final ms0 = m.date.millisecondsSinceEpoch;
+      times.add(idx < 0 ? ms0 - const Duration(days: 1).inMilliseconds : ms0);
+      seasons.add(m.season);
+    }
+    out[d.teams[t]] = TeamSeries(times, rec[t], seasons);
+  }
+  return EloHistoryData(out);
+}
+
+class EloHistoryData {
+  final Map<String, TeamSeries> series;
+  EloHistoryData(this.series);
+}
+
+class StandingRow {
+  final String team;
+  int played = 0, won = 0, drawn = 0, lost = 0, gf = 0, ga = 0;
+  final List<String> form = [];
+  StandingRow(this.team);
+  int get points => won * 3 + drawn;
+  int get goalDiff => gf - ga;
+}
+
+/// Classifica della Serie A di una stagione, dai risultati.
+List<StandingRow> standings(List<MatchResult> ms, int season) {
+  final rows = <String, StandingRow>{};
+  for (final m in ms) {
+    if (m.season != season) continue;
+    final h = rows.putIfAbsent(m.home, () => StandingRow(m.home));
+    final a = rows.putIfAbsent(m.away, () => StandingRow(m.away));
+    h.played++;
+    a.played++;
+    h.gf += m.hg;
+    h.ga += m.ag;
+    a.gf += m.ag;
+    a.ga += m.hg;
+    switch (m.outcome) {
+      case 0:
+        h.won++;
+        a.lost++;
+        h.form.add('V');
+        a.form.add('P');
+        break;
+      case 1:
+        h.drawn++;
+        a.drawn++;
+        h.form.add('N');
+        a.form.add('N');
+        break;
+      default:
+        a.won++;
+        h.lost++;
+        a.form.add('V');
+        h.form.add('P');
+    }
+  }
+  final list = rows.values.toList()
+    ..sort((x, y) {
+      if (y.points != x.points) return y.points - x.points;
+      if (y.goalDiff != x.goalDiff) return y.goalDiff - x.goalDiff;
+      if (y.gf != x.gf) return y.gf - x.gf;
+      return x.team.compareTo(y.team);
+    });
+  return list;
+}
+
+// ---------------------------------------------------------------------------
+// Verifica sul passato
+
+class BacktestArgs {
+  final int testSeasons;
+  final double threshold;
+  final double stake;
+  final double budget;
+  final EloParams? fixed; // parametri manuali; null = calibrazione automatica
+  final int calibFrom;
+  final int calibTo;
+  final String model; // 'elo' oppure 'dc'
+  final double? fixedHalfLife; // emivita manuale per Dixon-Coles
+
+  const BacktestArgs({
+    this.model = 'elo',
+    this.fixedHalfLife,
+    required this.testSeasons,
+    required this.threshold,
+    required this.stake,
+    required this.budget,
+    required this.fixed,
+    required this.calibFrom,
+    required this.calibTo,
+  });
 }
 
 /// Risultato della verifica sul passato.
 class BacktestResult {
   final int bets;
+  final int skippedLeastLikely; // giocate scartate perché sull'esito meno probabile
   final double staked;
   final double profit;
   final double roi; // profitto / puntato
@@ -370,6 +506,9 @@ class BacktestResult {
   final List<double> bankroll;
   final List<DateTime> dates;
   final EloParams params;
+  final String model;
+  final double halfLife;
+  final bool manual;
   final int trainFrom;
   final int trainTo;
   final int testFrom;
@@ -378,6 +517,7 @@ class BacktestResult {
 
   BacktestResult({
     required this.bets,
+    required this.skippedLeastLikely,
     required this.staked,
     required this.profit,
     required this.roi,
@@ -390,6 +530,9 @@ class BacktestResult {
     required this.bankroll,
     required this.dates,
     required this.params,
+    this.model = 'elo',
+    this.halfLife = 0,
+    required this.manual,
     required this.trainFrom,
     required this.trainTo,
     required this.testFrom,
@@ -399,6 +542,7 @@ class BacktestResult {
 
   factory BacktestResult.failed(String msg) => BacktestResult(
         bets: 0,
+        skippedLeastLikely: 0,
         staked: 0,
         profit: 0,
         roi: 0,
@@ -411,6 +555,7 @@ class BacktestResult {
         bankroll: const [],
         dates: const [],
         params: EloParams.standard,
+        manual: false,
         trainFrom: 0,
         trainTo: 0,
         testFrom: 0,
@@ -428,53 +573,65 @@ List<double> fairProbs(List<double> odds) {
   return inv.map((x) => x / s).toList();
 }
 
-/// Simula di aver usato il modello sulle ultime [testSeasons] stagioni
-/// complete, calibrandolo solo sulle stagioni precedenti.
-BacktestResult backtest(List<MatchResult> ms, int testSeasons, double threshold,
-    double stake, double budget) {
+/// Simula di aver usato il modello sulle ultime stagioni complete, calibrandolo
+/// solo su stagioni precedenti a quelle provate.
+BacktestResult backtest(List<MatchResult> ms, BacktestArgs args) {
   final counts = <int, int>{};
   for (final m in ms) {
     counts[m.season] = (counts[m.season] ?? 0) + 1;
   }
   final complete = counts.keys.where((s) => counts[s]! >= 370).toList()..sort();
-  if (complete.length < testSeasons + 3) {
+  if (complete.length < args.testSeasons + 2) {
     return BacktestResult.failed(
-        'Servono almeno ${testSeasons + 3} stagioni complete: aggiorna i dati.');
+        'Servono almeno ${args.testSeasons + 2} stagioni complete: aggiorna i dati.');
   }
-  final test = complete.sublist(complete.length - testSeasons);
+  final test = complete.sublist(complete.length - args.testSeasons);
   final testFrom = test.first, testTo = test.last;
-  final train = ms.where((m) => m.season < testFrom).toList();
-  final params = calibrate(train);
+  final dataFirst = ms.first.season;
+
+  final trainFrom = math.max(args.calibFrom, dataFirst);
+  final trainTo = math.min(args.calibTo, testFrom - 1);
+  if (trainTo - trainFrom < 1) {
+    return BacktestResult.failed(
+        'Le stagioni di calibrazione devono venire prima di quelle di prova '
+        '(che iniziano dal $testFrom) ed essere almeno due. Cambiale nelle Impostazioni.');
+  }
 
   final upto = ms.where((m) => m.season <= testTo).toList();
-  final d = _Prepared(upto);
-  final sim = _simulate(d, params);
-  final first = upto.first.season;
-
-  final dl = <double>[];
-  final ol = <int>[];
-  for (var i = 0; i < d.n; i++) {
-    if (d.season[i] == first || d.season[i] >= testFrom) continue;
-    dl.add(sim.diffs[i]);
-    ol.add(d.outc[i]);
+  final isDc = args.model == 'dc';
+  var params = args.fixed ?? EloParams.standard;
+  var halfLife = 0.0;
+  var testStart = 0;
+  while (testStart < upto.length && upto[testStart].season < testFrom) {
+    testStart++;
   }
-  final draw = fitDrawModel(dl, ol);
+  late final List<List<double>> testProbs;
+  if (isDc) {
+    halfLife = args.fixedHalfLife ?? calibrateDc(ms, from: trainFrom, to: trainTo);
+    final dd = DcData(upto);
+    testProbs = rollingProbs(dd, testStart, dd.n, halfLife).map((x) => x.p).toList();
+  } else {
+    params = args.fixed ?? calibrate(ms, from: trainFrom, to: trainTo);
+    final d = _Prepared(upto);
+    final sim = _simulate(d, params);
+    final draw = _fitDrawOn(d, sim, trainFrom, trainTo);
+    testProbs = [for (var i = testStart; i < d.n; i++) draw.probs(sim.diffs[i])];
+  }
 
-  var bets = 0;
+  var bets = 0, skipped = 0;
   var staked = 0.0, profit = 0.0;
   final returns = <double>[];
   var clvChecked = 0, clvBeaten = 0;
   var llModel = 0.0, llBook = 0.0;
   var nLl = 0;
   var nTest = 0;
-  final bankroll = <double>[budget];
+  final bankroll = <double>[args.budget];
   final dates = <DateTime>[];
 
-  for (var i = 0; i < d.n; i++) {
-    if (d.season[i] < testFrom) continue;
+  for (var i = testStart; i < upto.length; i++) {
     final m = upto[i];
     nTest++;
-    final p = draw.probs(sim.diffs[i]);
+    final p = testProbs[i - testStart];
     final o = m.outcome;
     final ref = m.closing ?? m.odds;
     if (ref != null) {
@@ -492,14 +649,18 @@ BacktestResult backtest(List<MatchResult> ms, int testSeasons, double threshold,
         pick = k;
       }
     }
-    if (ev < threshold) continue;
+    if (ev < args.threshold) continue;
+    if (isLeastLikely(p, pick)) {
+      skipped++;
+      continue;
+    }
     bets++;
-    staked += stake;
+    staked += args.stake;
     final won = pick == o;
     final r = won ? q[pick] - 1 : -1.0;
     returns.add(r);
-    profit += stake * r;
-    bankroll.add(budget + profit);
+    profit += args.stake * r;
+    bankroll.add(args.budget + profit);
     dates.add(m.date);
     final c = m.closing;
     if (c != null) {
@@ -521,6 +682,7 @@ BacktestResult backtest(List<MatchResult> ms, int testSeasons, double threshold,
 
   return BacktestResult(
     bets: bets,
+    skippedLeastLikely: skipped,
     staked: staked,
     profit: profit,
     roi: staked > 0 ? profit / staked : 0,
@@ -533,8 +695,11 @@ BacktestResult backtest(List<MatchResult> ms, int testSeasons, double threshold,
     bankroll: bankroll,
     dates: dates,
     params: params,
-    trainFrom: train.isEmpty ? 0 : train.first.season,
-    trainTo: testFrom - 1,
+    model: args.model,
+    halfLife: halfLife,
+    manual: isDc ? args.fixedHalfLife != null : args.fixed != null,
+    trainFrom: trainFrom,
+    trainTo: trainTo,
     testFrom: testFrom,
     testTo: testTo,
   );

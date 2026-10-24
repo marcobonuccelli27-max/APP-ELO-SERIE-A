@@ -349,11 +349,11 @@ class SmallField extends StatelessWidget {
   }
 }
 
-/// Grafico dell'andamento del budget.
-class BankrollPainter extends CustomPainter {
+/// Grafico a linea con una linea tratteggiata di riferimento a [start].
+class LineChartPainter extends CustomPainter {
   final List<double> values;
   final double start;
-  BankrollPainter(this.values, this.start);
+  LineChartPainter(this.values, this.start);
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -395,5 +395,5 @@ class BankrollPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant BankrollPainter old) => old.values != values || old.start != start;
+  bool shouldRepaint(covariant LineChartPainter old) => old.values != values || old.start != start;
 }

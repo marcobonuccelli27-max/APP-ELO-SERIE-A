@@ -1,5 +1,7 @@
 // Le quattro schermate: Giornata, Classifica, Verifica, Impostazioni.
 
+import 'dart:ui' show FontFeature;
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
@@ -59,6 +61,8 @@ class _GiornataScreenState extends State<GiornataScreen> {
                 Expanded(child: Text(app.progress, style: const TextStyle(fontSize: 13, color: C.grey))),
               ]),
             ),
+          if (s.provider == 'oddsapi' && app.requestsRemaining != null && !app.busy)
+            _QuotaLine(remaining: app.requestsRemaining!, used: app.requestsUsed, at: app.requestsCheckedAt),
           if (app.error != null) Notice(app.error!, tone: Tone.warning),
           if (app.oddsError != null) Notice(app.oddsError!, tone: Tone.warning),
           if (app.predictions.isEmpty && !app.busy && app.error == null && app.oddsError == null)
@@ -110,6 +114,57 @@ class _GiornataScreenState extends State<GiornataScreen> {
   }
 }
 
+/// Richieste rimaste nel piano gratuito di The Odds API.
+class _QuotaLine extends StatelessWidget {
+  final int remaining;
+  final int? used;
+  final DateTime? at;
+  const _QuotaLine({required this.remaining, required this.used, required this.at});
+
+  @override
+  Widget build(BuildContext context) {
+    final total = used == null ? null : remaining + used!;
+    final low = remaining <= 20;
+    final frac = total == null || total == 0 ? null : (remaining / total).clamp(0.0, 1.0).toDouble();
+    final when = at == null ? '' : ' · controllato ${dateLabel(at)}';
+    return Container(
+      margin: const EdgeInsets.only(top: 14),
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      decoration: BoxDecoration(color: low ? C.warnTint : C.fill, borderRadius: BorderRadius.circular(14)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Expanded(
+            child: Text(
+              total == null
+                  ? 'The Odds API: restano $remaining richieste questo mese'
+                  : 'The Odds API: restano $remaining richieste su $total',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: low ? C.warn : C.ink),
+            ),
+          ),
+        ]),
+        if (frac != null) ...[
+          const SizedBox(height: 8),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(3),
+            child: LinearProgressIndicator(
+              value: frac,
+              minHeight: 6,
+              backgroundColor: C.fill2,
+              color: low ? C.warn : C.blue,
+            ),
+          ),
+        ],
+        const SizedBox(height: 6),
+        Text(
+          '${low ? 'Stanno per finire: ' : ''}ogni “Aggiorna dati” ne usa una. '
+          'Il conteggio riparte all’inizio di ogni mese$when.',
+          style: const TextStyle(fontSize: 12, height: 1.4, color: C.grey),
+        ),
+      ]),
+    );
+  }
+}
+
 class MatchCard extends StatelessWidget {
   final Prediction pred;
   final Evaluation? eval;
@@ -139,8 +194,12 @@ class MatchCard extends StatelessWidget {
                 Text(dateLabel(pred.date), style: const TextStyle(fontSize: 12, color: C.grey)),
               ]),
               const SizedBox(height: 3),
-              Text('Elo ${pred.eloH.round()} contro ${pred.eloA.round()}',
-                  style: const TextStyle(fontSize: 12, color: C.grey)),
+              Text(
+                pred.xgHome != null
+                    ? 'Dixon-Coles · gol attesi ${fmt(pred.xgHome!, 1)} – ${fmt(pred.xgAway!, 1)}'
+                    : 'Elo ${pred.eloH.round()} contro ${pred.eloA.round()}',
+                style: const TextStyle(fontSize: 12, color: C.grey),
+              ),
               if (pred.unknownTeam)
                 const Padding(
                   padding: EdgeInsets.only(top: 4),
@@ -167,7 +226,7 @@ class MatchCard extends StatelessWidget {
               if (e == null)
                 const Text('Nessuna quota disponibile per i bookmaker scelti.',
                     style: TextStyle(fontSize: 13, color: C.grey))
-              else if (e.hasValue)
+              else if (e.hasValue) ...[
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
                   decoration: BoxDecoration(color: C.blueTint, borderRadius: BorderRadius.circular(14)),
@@ -175,10 +234,25 @@ class MatchCard extends StatelessWidget {
                     'Gioca ${outcomeLabels[e.pick]} · valore ${fmt(e.ev)} · ${euro(settings.stake)}',
                     style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: C.blueText),
                   ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Secondo il modello questo esito esce il ${pct(pred.p[e.pick])} delle volte: '
+                  'perderai comunque circa ${pct(1 - pred.p[e.pick])} delle giocate come questa.',
+                  style: const TextStyle(fontSize: 12, height: 1.4, color: C.grey),
+                ),
+              ] else if (e.overThreshold && e.leastLikely)
+                _Discouraged(
+                  'Sconsigliata. La quota su ${outcomeLabels[e.pick]} è conveniente (valore ${fmt(e.ev)}), '
+                  'ma è l’esito meno probabile: secondo il modello esce solo il ${pct(pred.p[e.pick])} delle volte, '
+                  'circa una volta su ${(1 / pred.p[e.pick]).round()}.',
                 )
+              else if (e.overThreshold && pred.unknownTeam)
+                const _Discouraged('Sconsigliata: una squadra non è stata riconosciuta, quindi la stima non è affidabile.')
               else
                 Text('Nessun valore (massimo ${fmt(e.ev)})',
                     style: const TextStyle(fontSize: 13, color: C.grey)),
+              if (pred.over25 != null) _OuBlock(pred: pred, settings: settings),
             ],
           ),
         ),
@@ -242,10 +316,22 @@ class MatchCard extends StatelessWidget {
                     style: const TextStyle(fontSize: 13, color: C.ink2, height: 1.4),
                   ),
                 ],
+                if (pred.over25 != null) ...[
+                  const SizedBox(height: 16),
+                  const Text('Gol', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: C.ink)),
+                  const SizedBox(height: 8),
+                  _kv('Gol attesi', '${fmt(pred.xgHome ?? 0, 2)} – ${fmt(pred.xgAway ?? 0, 2)}'),
+                  _kv('Over 2,5 (almeno 3 gol)', _ouLine(pred, 0)),
+                  _kv('Under 2,5 (al massimo 2 gol)', _ouLine(pred, 1)),
+                  _kv('Goal (segnano entrambe)', pct(pred.gg ?? 0, 1)),
+                  _kv('No goal', pct(1 - (pred.gg ?? 0), 1)),
+                ],
                 const SizedBox(height: 10),
                 const Text(
                   '“Prob. quota” è la probabilità nascosta nella quota (1 ÷ quota), margine del bookmaker compreso. '
-                  'Il valore supera 1 quando il modello stima l’esito più probabile di quanto la quota lasci intendere.',
+                  'Il valore supera 1 quando il modello stima l’esito più probabile di quanto la quota lasci intendere. '
+                  'Una giocata sull’esito meno probabile dei tre viene sempre sconsigliata, anche se la quota è conveniente: '
+                  'perderesti nella maggior parte dei casi e il risultato dipenderebbe quasi solo dalla fortuna.',
                   style: TextStyle(fontSize: 12, color: C.grey, height: 1.45),
                 ),
               ],
@@ -253,6 +339,86 @@ class MatchCard extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+Widget _kv(String k, String v) => Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(children: [
+        Expanded(child: Text(k, style: const TextStyle(fontSize: 14, color: C.ink2))),
+        Text(v, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: C.ink)),
+      ]),
+    );
+
+String _ouLine(Prediction pred, int side) {
+  final p = side == 0 ? pred.over25! : 1 - pred.over25!;
+  var best = 0.0;
+  pred.ouBooks.forEach((_, q) {
+    if (q[side] > best) best = q[side];
+  });
+  if (best <= 1) return pct(p, 1);
+  return '${pct(p, 1)} · quota ${fmt(best)} · valore ${fmt(p * best)}';
+}
+
+/// Over/under 2,5 e goal/no goal nella scheda della partita.
+class _OuBlock extends StatelessWidget {
+  final Prediction pred;
+  final Settings settings;
+  const _OuBlock({required this.pred, required this.settings});
+
+  @override
+  Widget build(BuildContext context) {
+    final ou = pred.evaluateOu(settings);
+    final o = pred.over25!;
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Divider(height: 1, color: C.line),
+        const SizedBox(height: 10),
+        Text(
+          'Over 2,5 ${pct(o)} · Under ${pct(1 - o)} · Goal ${pct(pred.gg ?? 0)}',
+          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: C.ink2),
+        ),
+        if (ou != null) ...[
+          const SizedBox(height: 8),
+          if (ou.hasValue)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+              decoration: BoxDecoration(color: C.blueTint, borderRadius: BorderRadius.circular(14)),
+              child: Text(
+                'Gioca ${ou.side == 0 ? 'Over' : 'Under'} 2,5 · quota ${fmt(ou.odds)} · valore ${fmt(ou.ev)} · ${euro(settings.stake)}',
+                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: C.blueText),
+              ),
+            )
+          else if (ou.overThreshold && ou.minority)
+            _Discouraged(
+              'Sconsigliata. La quota ${ou.side == 0 ? 'Over' : 'Under'} 2,5 è conveniente (valore ${fmt(ou.ev)}), '
+              'ma secondo il modello succede solo il ${pct(ou.prob)} delle volte: meno di una volta su due.',
+            )
+          else
+            Text('Over/under: nessun valore (massimo ${fmt(ou.ev)})',
+                style: const TextStyle(fontSize: 12, color: C.grey)),
+        ],
+      ]),
+    );
+  }
+}
+
+class _Discouraged extends StatelessWidget {
+  final String text;
+  const _Discouraged(this.text);
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(color: C.warnTint, borderRadius: BorderRadius.circular(12)),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Icon(CupertinoIcons.exclamationmark_triangle, size: 16, color: C.warn),
+        const SizedBox(width: 8),
+        Expanded(child: Text(text, style: const TextStyle(fontSize: 12.5, height: 1.4, color: C.ink2))),
+      ]),
     );
   }
 }
@@ -289,100 +455,213 @@ class _OutcomeCell extends StatelessWidget {
 }
 
 // ===========================================================================
-// Classifica
+// Classifiche: Elo e Serie A
 
-class ClassificaScreen extends StatelessWidget {
+/// Finestra per scegliere una stagione.
+Future<int?> pickSeason(BuildContext context, List<int> seasons, int? selected, {String? zeroLabel}) {
+  return showModalBottomSheet<int>(
+    context: context,
+    backgroundColor: C.white,
+    showDragHandle: true,
+    isScrollControlled: true,
+    shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+    builder: (ctx) {
+      Widget tile(int value, String label) => ListTile(
+            title: Text(label, style: const TextStyle(fontSize: 16, color: C.ink)),
+            trailing: selected == value ? const Icon(CupertinoIcons.checkmark_alt, color: C.blue) : null,
+            onTap: () => Navigator.pop(ctx, value),
+          );
+      return SafeArea(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.6),
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              if (zeroLabel != null) tile(0, zeroLabel),
+              for (final s in seasons) tile(s, 'Stagione ${seasonLabel(s)}'),
+            ],
+          ),
+        ),
+      );
+    },
+  );
+}
+
+class ClassificaScreen extends StatefulWidget {
   const ClassificaScreen({super.key});
+  @override
+  State<ClassificaScreen> createState() => _ClassificaScreenState();
+}
+
+class _ClassificaScreenState extends State<ClassificaScreen> {
+  int? season;
+  int mode = 0; // 0 = Elo, 1 = Serie A
 
   @override
   Widget build(BuildContext context) {
     final app = AppScope.of(context);
-    final rows = app.table;
-    final season = app.tableSeason ?? currentSeasonStart(DateTime.now());
+    final seasons = app.seasonsAvailable;
+    if (seasons.isEmpty) {
+      return const SafeArea(
+        bottom: false,
+        child: Padding(
+          padding: _pagePadding,
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            PageHeader(title: 'Classifiche', subtitle: 'Serie A'),
+            Notice('Aggiorna i dati dalla schermata Giornata per vedere le classifiche.'),
+          ]),
+        ),
+      );
+    }
+    final sel = (season != null && seasons.contains(season)) ? season! : seasons.first;
     return SafeArea(
       bottom: false,
       child: ListView(
         padding: _pagePadding,
         children: [
-          PageHeader(
-            title: 'Classifica Elo',
-            subtitle: rows.isEmpty ? 'Serie A' : 'Stagione ${seasonLabel(season)} · la media è 1500',
+          const PageHeader(title: 'Classifiche', subtitle: 'Serie A'),
+          const SizedBox(height: 16),
+          Material(
+            color: C.fill,
+            borderRadius: BorderRadius.circular(12),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(12),
+              onTap: () async {
+                final s = await pickSeason(context, seasons, sel);
+                if (s != null) setState(() => season = s);
+              },
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
+                child: Row(children: [
+                  Text('Stagione ${seasonLabel(sel)}',
+                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: C.ink)),
+                  const Spacer(),
+                  const Text('Cambia', style: TextStyle(fontSize: 14, color: C.blue)),
+                  const SizedBox(width: 4),
+                  const Icon(CupertinoIcons.chevron_down, size: 14, color: C.blue),
+                ]),
+              ),
+            ),
           ),
-          if (rows.isEmpty)
-            const Notice('Aggiorna i dati dalla schermata Giornata per vedere la classifica.')
-          else ...[
-            const SizedBox(height: 18),
-            Container(
-              decoration: BoxDecoration(color: C.fill, borderRadius: BorderRadius.circular(16)),
-              child: Column(children: [
-                for (var i = 0; i < rows.length; i++) ...[
-                  if (i > 0) const Divider(height: 1, thickness: 1, color: C.line, indent: 50),
-                  _TeamTile(rank: i + 1, row: rows[i]),
-                ],
-              ]),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: CupertinoSlidingSegmentedControl<int>(
+              groupValue: mode,
+              children: const {
+                0: Padding(padding: EdgeInsets.symmetric(vertical: 8), child: Text('Elo')),
+                1: Padding(padding: EdgeInsets.symmetric(vertical: 8), child: Text('Serie A')),
+                2: Padding(padding: EdgeInsets.symmetric(vertical: 8), child: Text('Attacco e difesa')),
+              },
+              onValueChanged: (v) => setState(() => mode = v ?? 0),
             ),
-            const Padding(
-              padding: EdgeInsets.only(top: 12, left: 4),
-              child: Text('Ultime 5 partite: V vinta, N pareggiata, P persa. La freccia indica la variazione nell’ultima partita.',
-                  style: TextStyle(fontSize: 12, height: 1.45, color: C.grey)),
-            ),
-          ],
+          ),
+          const SizedBox(height: 14),
+          FutureBuilder<SeasonView>(
+            future: app.seasonView(sel),
+            builder: (ctx, snap) {
+              if (snap.hasError) return Notice(snap.error.toString(), tone: Tone.warning);
+              if (!snap.hasData) {
+                return const Padding(
+                  padding: EdgeInsets.all(30),
+                  child: Center(child: CupertinoActivityIndicator()),
+                );
+              }
+              final v = snap.data!;
+              if (mode == 0) return _EloList(view: v);
+              if (mode == 1) return _StandingsTable(view: v);
+              return _DcTable(view: v);
+            },
+          ),
         ],
       ),
     );
   }
 }
 
+class _EloList extends StatelessWidget {
+  final SeasonView view;
+  const _EloList({required this.view});
+
+  @override
+  Widget build(BuildContext context) {
+    final rows = view.elo;
+    final p = view.params;
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Container(
+        decoration: BoxDecoration(color: C.fill, borderRadius: BorderRadius.circular(16)),
+        clipBehavior: Clip.antiAlias,
+        child: Column(children: [
+          for (var i = 0; i < rows.length; i++) ...[
+            if (i > 0) const Divider(height: 1, thickness: 1, color: C.line, indent: 50),
+            _TeamTile(rank: i + 1, row: rows[i], onTap: () => showTeamSheet(context, view, rows[i].name)),
+          ],
+        ]),
+      ),
+      Padding(
+        padding: const EdgeInsets.only(top: 12, left: 4),
+        child: Text(
+          'La freccia indica la variazione dall’inizio della stagione; le caselle sono le ultime 5 partite '
+          '(V vinta, N pareggiata, P persa). Tocca una squadra per vedere l’andamento del punteggio. '
+          'Calcolato con K ${fmt(p.k, 0)}, casa +${fmt(p.home, 0)}, riavvicinamento ${fmt(p.regress * 100, 0)}%.',
+          style: const TextStyle(fontSize: 12, height: 1.45, color: C.grey),
+        ),
+      ),
+    ]);
+  }
+}
+
 class _TeamTile extends StatelessWidget {
   final int rank;
   final TeamRow row;
-  const _TeamTile({required this.rank, required this.row});
+  final VoidCallback onTap;
+  const _TeamTile({required this.rank, required this.row, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
     final frac = ((row.rating - 1350) / 450).clamp(0.03, 1.0).toDouble();
-    final d = row.delta.round();
+    final d = row.change.round();
     final deltaText = d == 0 ? '±0' : (d > 0 ? '▲ +$d' : '▼ −${d.abs()}');
     final deltaColor = d == 0 ? C.grey : (d > 0 ? C.blueText : C.warn);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 12, 16, 12),
-      child: Row(children: [
-        SizedBox(
-          width: 26,
-          child: Text('$rank', style: const TextStyle(fontSize: 14, color: C.grey)),
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(row.name, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: C.ink)),
-            const SizedBox(height: 7),
-            Row(children: [
-              Expanded(
-                child: Container(
-                  height: 5,
-                  decoration: BoxDecoration(color: C.fill2, borderRadius: BorderRadius.circular(3)),
-                  child: FractionallySizedBox(
-                    alignment: Alignment.centerLeft,
-                    widthFactor: frac,
-                    child: Container(
-                      decoration: BoxDecoration(color: C.blue, borderRadius: BorderRadius.circular(3)),
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 12, 16, 12),
+        child: Row(children: [
+          SizedBox(width: 26, child: Text('$rank', style: const TextStyle(fontSize: 14, color: C.grey))),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(row.name, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: C.ink)),
+              const SizedBox(height: 7),
+              Row(children: [
+                Expanded(
+                  child: Container(
+                    height: 5,
+                    decoration: BoxDecoration(color: C.fill2, borderRadius: BorderRadius.circular(3)),
+                    child: FractionallySizedBox(
+                      alignment: Alignment.centerLeft,
+                      widthFactor: frac,
+                      child: Container(
+                        decoration: BoxDecoration(color: C.blue, borderRadius: BorderRadius.circular(3)),
+                      ),
                     ),
                   ),
                 ),
-              ),
-              const SizedBox(width: 10),
-              for (final f in row.form) ...[const SizedBox(width: 3), _FormChip(f)],
+                const SizedBox(width: 10),
+                for (final f in row.form) ...[const SizedBox(width: 3), _FormChip(f)],
+              ]),
             ]),
+          ),
+          const SizedBox(width: 14),
+          Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+            Text('${row.rating.round()}',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: C.ink)),
+            const SizedBox(height: 3),
+            Text(deltaText, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: deltaColor)),
           ]),
-        ),
-        const SizedBox(width: 14),
-        Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-          Text('${row.rating.round()}',
-              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: C.ink)),
-          const SizedBox(height: 3),
-          Text(deltaText, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: deltaColor)),
         ]),
-      ]),
+      ),
     );
   }
 }
@@ -409,6 +688,264 @@ class _FormChip extends StatelessWidget {
   }
 }
 
+class _StandingsTable extends StatelessWidget {
+  final SeasonView view;
+  const _StandingsTable({required this.view});
+
+  @override
+  Widget build(BuildContext context) {
+    const head = TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: C.grey);
+    const cell = TextStyle(fontSize: 14, color: C.ink2, fontFeatures: [FontFeature.tabularFigures()]);
+    Widget n(String t, TextStyle st, {double w = 26}) =>
+        SizedBox(width: w, child: Text(t, style: st, textAlign: TextAlign.right));
+    final rows = view.table;
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Container(
+        decoration: BoxDecoration(color: C.fill, borderRadius: BorderRadius.circular(16)),
+        clipBehavior: Clip.antiAlias,
+        child: Column(children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+            child: Row(children: [
+              const SizedBox(width: 22, child: Text('#', style: head)),
+              const Expanded(child: Text('Squadra', style: head)),
+              n('G', head),
+              n('V', head),
+              n('N', head),
+              n('P', head),
+              n('DR', head, w: 32),
+              n('Pt', head, w: 32),
+            ]),
+          ),
+          const Divider(height: 1, thickness: 1, color: C.line),
+          for (var i = 0; i < rows.length; i++) ...[
+            if (i > 0) const Divider(height: 1, thickness: 1, color: C.line, indent: 12),
+            InkWell(
+              onTap: () => showTeamSheet(context, view, rows[i].team),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+                child: Row(children: [
+                  SizedBox(width: 22, child: Text('${i + 1}', style: const TextStyle(fontSize: 13, color: C.grey))),
+                  Expanded(
+                    child: Text(rows[i].team,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: C.ink)),
+                  ),
+                  n('${rows[i].played}', cell),
+                  n('${rows[i].won}', cell),
+                  n('${rows[i].drawn}', cell),
+                  n('${rows[i].lost}', cell),
+                  n('${rows[i].goalDiff > 0 ? '+' : ''}${rows[i].goalDiff}', cell, w: 32),
+                  n('${rows[i].points}', cell.copyWith(fontWeight: FontWeight.w700, color: C.ink), w: 32),
+                ]),
+              ),
+            ),
+          ],
+        ]),
+      ),
+      const Padding(
+        padding: EdgeInsets.only(top: 12, left: 4),
+        child: Text(
+          'G giocate, V vinte, N pareggiate, P perse, DR differenza reti, Pt punti. '
+          'A parità di punti l’ordine segue differenza reti e gol fatti; il regolamento usa prima gli scontri diretti. '
+          'Tocca una squadra per vedere l’andamento del suo punteggio Elo.',
+          style: TextStyle(fontSize: 12, height: 1.45, color: C.grey),
+        ),
+      ),
+    ]);
+  }
+}
+
+class _DcTable extends StatelessWidget {
+  final SeasonView view;
+  const _DcTable({required this.view});
+
+  @override
+  Widget build(BuildContext context) {
+    final rows = view.dc;
+    if (rows.isEmpty) return const Notice('Non ci sono abbastanza partite per stimare attacco e difesa.');
+    const head = TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: C.grey);
+    const cell = TextStyle(fontSize: 14, color: C.ink, fontFeatures: [FontFeature.tabularFigures()]);
+    final maxGf = rows.map((r) => r.goalsFor).reduce((a, b) => a > b ? a : b);
+    final maxGa = rows.map((r) => r.goalsAgainst).reduce((a, b) => a > b ? a : b);
+    Widget bar(double v, double max, Color c) => SizedBox(
+          width: 44,
+          height: 5,
+          child: Container(
+            decoration: BoxDecoration(color: C.fill2, borderRadius: BorderRadius.circular(3)),
+            child: FractionallySizedBox(
+              alignment: Alignment.centerLeft,
+              widthFactor: (v / max).clamp(0.05, 1.0).toDouble(),
+              child: Container(decoration: BoxDecoration(color: c, borderRadius: BorderRadius.circular(3))),
+            ),
+          ),
+        );
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Container(
+        decoration: BoxDecoration(color: C.fill, borderRadius: BorderRadius.circular(16)),
+        clipBehavior: Clip.antiAlias,
+        child: Column(children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(12, 10, 12, 8),
+            child: Row(children: [
+              SizedBox(width: 22, child: Text('#', style: head)),
+              Expanded(child: Text('Squadra', style: head)),
+              SizedBox(width: 92, child: Text('Segna', style: head)),
+              SizedBox(width: 92, child: Text('Subisce', style: head)),
+            ]),
+          ),
+          const Divider(height: 1, thickness: 1, color: C.line),
+          for (var i = 0; i < rows.length; i++) ...[
+            if (i > 0) const Divider(height: 1, thickness: 1, color: C.line, indent: 12),
+            InkWell(
+              onTap: () => showTeamSheet(context, view, rows[i].name),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+                child: Row(children: [
+                  SizedBox(width: 22, child: Text('${i + 1}', style: const TextStyle(fontSize: 13, color: C.grey))),
+                  Expanded(
+                    child: Text(rows[i].name,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: C.ink)),
+                  ),
+                  SizedBox(
+                    width: 92,
+                    child: Row(children: [
+                      SizedBox(width: 36, child: Text(fmt(rows[i].goalsFor), style: cell)),
+                      bar(rows[i].goalsFor, maxGf, C.blue),
+                    ]),
+                  ),
+                  SizedBox(
+                    width: 92,
+                    child: Row(children: [
+                      SizedBox(width: 36, child: Text(fmt(rows[i].goalsAgainst), style: cell)),
+                      bar(rows[i].goalsAgainst, maxGa, C.warn),
+                    ]),
+                  ),
+                ]),
+              ),
+            ),
+          ],
+        ]),
+      ),
+      Padding(
+        padding: const EdgeInsets.only(top: 12, left: 4),
+        child: Text(
+          'Stima Dixon-Coles a fine periodo: gol che la squadra segnerebbe e subirebbe in media, a partita, '
+          'contro un avversario nella media e in campo neutro. Ordinate per differenza tra i due. '
+          'Le partite recenti contano di più: con emivita ${fmt(view.halfLife, 0)} giorni, una partita di '
+          '${fmt(view.halfLife, 0)} giorni fa vale la metà di una di oggi.',
+          style: const TextStyle(fontSize: 12, height: 1.45, color: C.grey),
+        ),
+      ),
+    ]);
+  }
+}
+
+void showTeamSheet(BuildContext context, SeasonView view, String team) {
+  final series = view.series[team];
+  if (series == null) return;
+  showModalBottomSheet<void>(
+    context: context,
+    backgroundColor: C.white,
+    showDragHandle: true,
+    isScrollControlled: true,
+    shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+    builder: (_) => _TeamSheet(team: team, season: view.season, series: series),
+  );
+}
+
+class _TeamSheet extends StatefulWidget {
+  final String team;
+  final int season;
+  final TeamSeries series;
+  const _TeamSheet({required this.team, required this.season, required this.series});
+  @override
+  State<_TeamSheet> createState() => _TeamSheetState();
+}
+
+class _TeamSheetState extends State<_TeamSheet> {
+  bool all = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final s = widget.series;
+    final vals = all ? s.r : s.seasonValues(widget.season);
+    final times = all ? s.t : s.seasonTimes(widget.season);
+    final hasData = vals.length >= 2;
+    final hi = hasData ? vals.reduce((a, b) => a > b ? a : b) : 0.0;
+    final lo = hasData ? vals.reduce((a, b) => a < b ? a : b) : 0.0;
+    final firstSeasonOfTeam = s.s.isEmpty ? widget.season : s.s.first;
+    final seasonsPlayed = s.s.toSet().length;
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(widget.team, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: C.ink)),
+            const SizedBox(height: 2),
+            Text(
+              all
+                  ? '$seasonsPlayed stagioni in Serie A dal ${seasonLabel(firstSeasonOfTeam)}'
+                  : 'Stagione ${seasonLabel(widget.season)}',
+              style: const TextStyle(fontSize: 13, color: C.grey),
+            ),
+            const SizedBox(height: 14),
+            SizedBox(
+              width: double.infinity,
+              child: CupertinoSlidingSegmentedControl<bool>(
+                groupValue: all,
+                children: const {
+                  false: Padding(padding: EdgeInsets.symmetric(vertical: 7), child: Text('Questa stagione')),
+                  true: Padding(padding: EdgeInsets.symmetric(vertical: 7), child: Text('Tutte le stagioni')),
+                },
+                onValueChanged: (v) => setState(() => all = v ?? false),
+              ),
+            ),
+            const SizedBox(height: 14),
+            if (!hasData)
+              const Notice('Non ci sono abbastanza partite per disegnare l’andamento.')
+            else ...[
+              Row(children: [
+                Expanded(child: StatCard(label: all ? 'Ultimo' : 'Fine periodo', value: '${vals.last.round()}')),
+                const SizedBox(width: 10),
+                Expanded(child: StatCard(label: 'Massimo', value: '${hi.round()}')),
+                const SizedBox(width: 10),
+                Expanded(child: StatCard(label: 'Minimo', value: '${lo.round()}')),
+              ]),
+              const SizedBox(height: 16),
+              SizedBox(
+                height: 190,
+                width: double.infinity,
+                child: CustomPaint(painter: LineChartPainter(vals, 1500)),
+              ),
+              const SizedBox(height: 6),
+              Row(children: [
+                Text(shortDate(DateTime.fromMillisecondsSinceEpoch(times.first)),
+                    style: const TextStyle(fontSize: 12, color: C.grey)),
+                const Spacer(),
+                Text(shortDate(DateTime.fromMillisecondsSinceEpoch(times.last)),
+                    style: const TextStyle(fontSize: 12, color: C.grey)),
+              ]),
+              const SizedBox(height: 10),
+              Text(
+                all
+                    ? 'Punteggio dopo ogni partita di Serie A; gli anni fuori dalla Serie A non compaiono. '
+                        'La linea tratteggiata è la media del campionato (1500).'
+                    : 'Il primo punto è il punteggio di partenza della stagione, poi uno dopo ogni partita. '
+                        'La linea tratteggiata è la media del campionato (1500).',
+                style: const TextStyle(fontSize: 12, height: 1.45, color: C.grey),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 // ===========================================================================
 // Verifica sul passato
 
@@ -420,6 +957,7 @@ class VerificaScreen extends StatefulWidget {
 
 class _VerificaScreenState extends State<VerificaScreen> {
   int seasons = 3;
+  String? model;
   double? thr;
   bool running = false;
   BacktestResult? result;
@@ -431,7 +969,7 @@ class _VerificaScreenState extends State<VerificaScreen> {
       error = null;
     });
     try {
-      final r = await app.runBacktest(seasons, thr ?? app.settings.threshold);
+      final r = await app.runBacktest(seasons, thr ?? app.settings.threshold, model ?? app.settings.model);
       if (!mounted) return;
       setState(() {
         result = r;
@@ -448,6 +986,7 @@ class _VerificaScreenState extends State<VerificaScreen> {
   Widget build(BuildContext context) {
     final app = AppScope.of(context);
     final t = thr ?? app.settings.threshold.clamp(1.0, 1.2).toDouble();
+    final m = model ?? app.settings.model;
     final r = result;
     return SafeArea(
       bottom: false,
@@ -460,6 +999,21 @@ class _VerificaScreenState extends State<VerificaScreen> {
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(color: C.fill, borderRadius: BorderRadius.circular(16)),
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('Modello', style: TextStyle(fontSize: 13, color: C.grey)),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: CupertinoSlidingSegmentedControl<String>(
+                  groupValue: m,
+                  backgroundColor: C.fill2,
+                  children: const {
+                    'elo': Padding(padding: EdgeInsets.symmetric(vertical: 7), child: Text('Elo')),
+                    'dc': Padding(padding: EdgeInsets.symmetric(vertical: 7), child: Text('Dixon-Coles')),
+                  },
+                  onValueChanged: (v) => setState(() => model = v ?? 'elo'),
+                ),
+              ),
+              const SizedBox(height: 16),
               const Text('Stagioni di prova', style: TextStyle(fontSize: 13, color: C.grey)),
               const SizedBox(height: 8),
               SizedBox(
@@ -492,7 +1046,19 @@ class _VerificaScreenState extends State<VerificaScreen> {
                   onChanged: (v) => setState(() => thr = v),
                 ),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 4),
+              Text(
+                (app.settings.autoCalib
+                        ? 'Calibrazione automatica sulle stagioni scelte nelle Impostazioni '
+                            '(dal ${seasonLabel(app.settings.calibFrom)}), fermandosi prima delle stagioni di prova.'
+                        : m == 'dc'
+                            ? 'Usa la tua emivita: ${fmt(app.settings.dcHalfLife, 0)} giorni.'
+                            : 'Usa i tuoi valori: K ${fmt(app.settings.k, 0)}, casa +${fmt(app.settings.home, 0)}, '
+                                'riavvicinamento ${fmt(app.settings.regress * 100, 0)}%.') +
+                    (m == 'dc' ? ' Con Dixon-Coles la verifica può richiedere fino a un paio di minuti.' : ''),
+                style: const TextStyle(fontSize: 12, height: 1.4, color: C.grey),
+              ),
+              const SizedBox(height: 12),
               PrimaryButton(
                 label: running ? 'Calcolo…' : 'Avvia verifica',
                 icon: CupertinoIcons.play_fill,
@@ -571,7 +1137,7 @@ class _VerificaScreenState extends State<VerificaScreen> {
             width: double.infinity,
             child: r.bankroll.length < 2
                 ? const Center(child: Text('Nessuna scommessa da mostrare', style: TextStyle(fontSize: 13, color: C.grey)))
-                : CustomPaint(painter: BankrollPainter(r.bankroll, s.budget)),
+                : CustomPaint(painter: LineChartPainter(r.bankroll, s.budget)),
           ),
           if (r.dates.isNotEmpty) ...[
             const SizedBox(height: 6),
@@ -587,13 +1153,40 @@ class _VerificaScreenState extends State<VerificaScreen> {
       Padding(
         padding: const EdgeInsets.only(top: 12, left: 4),
         child: Text(
-          'Calibrato su ${seasonLabel(r.trainFrom)}–${seasonLabel(r.trainTo)}: K ${fmt(r.params.k, 0)}, '
-          'casa +${fmt(r.params.home, 0)}, riavvicinamento ${fmt(r.params.regress * 100, 0)}%. '
+          '${r.model == 'dc' ? 'Dixon-Coles' : 'Elo'}, '
+          '${r.manual ? 'con i tuoi valori' : 'calibrato su ${seasonLabel(r.trainFrom)}–${seasonLabel(r.trainTo)}'}: '
+          '${r.model == 'dc' ? 'emivita ${fmt(r.halfLife, 0)} giorni' : 'K ${fmt(r.params.k, 0)}, casa +${fmt(r.params.home, 0)}, riavvicinamento ${fmt(r.params.regress * 100, 0)}%'}. '
           'Provato su ${seasonLabel(r.testFrom)}–${seasonLabel(r.testTo)} con le quote Bet365 '
           '(o la media dei bookmaker) disponibili prima delle partite. '
-          '“Errore” è la log loss: più è basso, meglio si prevede.',
+          '${r.skippedLeastLikely > 0 ? 'Scartate ${r.skippedLeastLikely} giocate perché sull’esito meno probabile.' : ''}',
           style: const TextStyle(fontSize: 12, height: 1.45, color: C.grey),
         ),
+      ),
+      const Group(
+        title: 'Come leggere i risultati',
+        rows: [
+          _Explain(
+            'Risultato e percentuale',
+            'La percentuale è il guadagno o la perdita rispetto al totale puntato. '
+                'Con −4% avresti perso 4 € ogni 100 € giocati.',
+          ),
+          _Explain(
+            'Il ± dopo la percentuale',
+            'È il margine dovuto al caso. Il risultato vero cade in questo intervallo circa 95 volte su 100: '
+                'se l’intervallo comprende lo zero (per esempio −4% ± 9%), non si può dire se il modello guadagna o perde.',
+          ),
+          _Explain(
+            'Quote poi scese',
+            'Quante volte la quota presa era più alta di quella di chiusura, la più precisa. '
+                'Sopra il 50% vuol dire che il modello anticipa il mercato: è il segnale più affidabile.',
+          ),
+          _Explain(
+            'Errore',
+            'Misura quanto sono buone le previsioni: per ogni partita conta la probabilità data al risultato uscito davvero. '
+                'Più è basso meglio è. Chi dà sempre 33% a ogni esito ottiene 1,099; se il modello ha un errore più alto '
+                'del bookmaker, prevede peggio delle quote.',
+          ),
+        ],
       ),
     ];
   }
@@ -632,6 +1225,24 @@ class _VerificaScreenState extends State<VerificaScreen> {
   }
 }
 
+class _Explain extends StatelessWidget {
+  final String title;
+  final String text;
+  const _Explain(this.title, this.text);
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: C.ink)),
+        const SizedBox(height: 3),
+        Text(text, style: const TextStyle(fontSize: 13, height: 1.45, color: C.ink2)),
+      ]),
+    );
+  }
+}
+
 // ===========================================================================
 // Impostazioni
 
@@ -648,6 +1259,7 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
   final k = TextEditingController();
   final home = TextEditingController();
   final regress = TextEditingController();
+  final halfLife = TextEditingController();
   bool _ready = false;
 
   @override
@@ -661,12 +1273,13 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
     k.text = fmt(s.k, 0);
     home.text = fmt(s.home, 0);
     regress.text = fmt(s.regress * 100, 0);
+    halfLife.text = fmt(s.dcHalfLife, 0);
     _ready = true;
   }
 
   @override
   void dispose() {
-    for (final c in [apiKey, budget, threshold, k, home, regress]) {
+    for (final c in [apiKey, budget, threshold, k, home, regress, halfLife]) {
       c.dispose();
     }
     super.dispose();
@@ -680,6 +1293,7 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
     final s = app.settings;
     final p = app.paramsInUse;
     final books = app.booksSeen.toList()..sort();
+    final calibSeasons = [for (var y = app.currentSeason - 1; y >= firstSeason; y--) y];
 
     void save() => app.saveSettings();
 
@@ -716,7 +1330,11 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
               if (s.provider == 'oddsapi') ...[
                 SettingRow(
                   label: 'Chiave API',
-                  sub: app.requestsRemaining == null ? null : 'Richieste rimaste: ${app.requestsRemaining}',
+                  sub: app.requestsRemaining == null
+                      ? null
+                      : app.requestsUsed == null
+                          ? 'Richieste rimaste: ${app.requestsRemaining}'
+                          : 'Richieste rimaste: ${app.requestsRemaining} su ${app.requestsRemaining! + app.requestsUsed!}',
                   trailing: SmallField(
                     controller: apiKey,
                     width: 170,
@@ -809,9 +1427,14 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
           ),
           Group(
             title: 'Modello',
-            footer: s.autoCalib
-                ? 'La calibrazione automatica prova centinaia di combinazioni sulle stagioni passate e tiene quella che prevede meglio.'
-                : 'Dopo aver cambiato i valori, premi “Ricalcola con questi valori”.',
+            footer: (s.autoCalib
+                    ? 'La calibrazione automatica prova centinaia di combinazioni sulle stagioni scelte e tiene quella che prevede meglio. '
+                    : 'Dopo aver cambiato i valori, premi “Ricalcola con questi valori”. ') +
+                'Dixon-Coles stima attacco e difesa di ogni squadra dai gol, dando più peso alle partite recenti, '
+                'e calcola anche over/under 2,5 e goal/no goal. La classifica Elo resta sempre disponibile. '
+                'Le stagioni scelte servono anche a stimare la probabilità dei pareggi. La prima stagione dei dati '
+                '(${seasonLabel(firstSeason)}) serve solo ad avviare i punteggi. Nella verifica sul passato la calibrazione '
+                'si ferma comunque prima delle stagioni di prova.',
             rows: [
               SettingRow(
                 label: 'Calibrazione automatica',
@@ -824,6 +1447,46 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
                     save();
                   },
                 ),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(10),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: CupertinoSlidingSegmentedControl<String>(
+                    groupValue: s.model,
+                    backgroundColor: C.fill2,
+                    children: const {
+                      'elo': Padding(padding: EdgeInsets.symmetric(vertical: 7), child: Text('Previsioni con Elo')),
+                      'dc': Padding(padding: EdgeInsets.symmetric(vertical: 7), child: Text('Con Dixon-Coles')),
+                    },
+                    onValueChanged: (v) {
+                      s.model = v ?? 'elo';
+                      save();
+                    },
+                  ),
+                ),
+              ),
+              _SeasonRow(
+                label: 'Calibra dalla stagione',
+                value: seasonLabel(s.calibFrom),
+                onTap: () async {
+                  final picked = await pickSeason(context, calibSeasons, s.calibFrom);
+                  if (picked == null || picked == 0) return;
+                  s.calibFrom = picked;
+                  if (s.calibTo != 0 && s.calibTo < picked) s.calibTo = picked;
+                  save();
+                },
+              ),
+              _SeasonRow(
+                label: 'Fino alla stagione',
+                value: s.calibTo == 0 ? 'Ultima completa' : seasonLabel(s.calibTo),
+                onTap: () async {
+                  final picked = await pickSeason(context, calibSeasons, s.calibTo, zeroLabel: 'Ultima completa');
+                  if (picked == null) return;
+                  s.calibTo = picked;
+                  if (picked != 0 && s.calibFrom > picked) s.calibFrom = picked;
+                  save();
+                },
               ),
               if (!s.autoCalib) ...[
                 SettingRow(
@@ -870,8 +1533,25 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
                   ),
                 ),
               ],
+              if (!s.autoCalib && s.model == 'dc')
+                SettingRow(
+                  label: 'Emivita Dixon-Coles',
+                  sub: 'Giorni dopo cui una partita conta la metà',
+                  trailing: SmallField(
+                    controller: halfLife,
+                    suffix: 'gg',
+                    onChanged: (v) {
+                      final n = _num(v);
+                      if (n != null && n >= 20 && n <= 2000) {
+                        s.dcHalfLife = n;
+                        save();
+                      }
+                    },
+                  ),
+                ),
               SettingRow(
                 label: 'Valori in uso',
+                sub: s.model == 'dc' ? 'Emivita Dixon-Coles: ${fmt(app.halfLifeInUse, 0)} giorni' : null,
                 trailing: Text(
                   'K ${fmt(p.k, 0)} · casa +${fmt(p.home, 0)} · ${fmt(p.regress * 100, 0)}%',
                   style: const TextStyle(fontSize: 14, color: C.grey),
@@ -908,6 +1588,28 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _SeasonRow extends StatelessWidget {
+  final String label;
+  final String value;
+  final VoidCallback onTap;
+  const _SeasonRow({required this.label, required this.value, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      child: SettingRow(
+        label: label,
+        trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+          Text(value, style: const TextStyle(fontSize: 15, color: C.blue)),
+          const SizedBox(width: 4),
+          const Icon(CupertinoIcons.chevron_right, size: 14, color: C.mid),
+        ]),
       ),
     );
   }
