@@ -33,6 +33,7 @@ jobs:
           flutter create . --platforms=android --org it.eloseriea --project-name elo_serie_a
           sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <application#' android/app/src/main/AndroidManifest.xml
           sed -i 's#android:label="elo_serie_a"#android:label="Elo Serie A"#' android/app/src/main/AndroidManifest.xml
+          sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 35/' android/app/build.gradle
           rm -rf test
           cat > android/app/proguard-rules.pro << 'REGOLE'
           -dontwarn com.google.mlkit.vision.text.chinese.**
