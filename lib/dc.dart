@@ -328,17 +328,19 @@ List<DcProbs> rollingProbs(DcData d, int from, int to, double halfLife) {
   return out;
 }
 
-double _logLoss(DcData d, int from, List<DcProbs> probs) {
-  var s = 0.0;
+double _logLoss(DcData d, int from, List<DcProbs> probs, {double recentHalf = 0, int refSeason = 0}) {
+  var s = 0.0, w = 0.0;
   for (var k = 0; k < probs.length; k++) {
-    s += -math.log(math.max(probs[k].p[d.outc[from + k]], 1e-9));
+    final wk = recentHalf > 0 ? math.pow(0.5, (refSeason - d.season[from + k]) / recentHalf).toDouble() : 1.0;
+    s += wk * -math.log(math.max(probs[k].p[d.outc[from + k]], 1e-9));
+    w += wk;
   }
-  return probs.isEmpty ? 1e9 : s / probs.length;
+  return probs.isEmpty || w == 0 ? 1e9 : s / w;
 }
 
 /// Sceglie l'emivita che prevede meglio le stagioni da [from] a [to]
 /// (al massimo le ultime tre, per non rendere il calcolo troppo lungo).
-double calibrateDc(List<MatchResult> ms, {int from = 0, int to = 1 << 30}) {
+double calibrateDc(List<MatchResult> ms, {int from = 0, int to = 1 << 30, double recentHalf = 0}) {
   final sub = ms.where((m) => m.season <= to).toList();
   if (sub.isEmpty) return dcDefaultHalfLife;
   final d = DcData(sub);
@@ -354,7 +356,7 @@ double calibrateDc(List<MatchResult> ms, {int from = 0, int to = 1 << 30}) {
   if (b - a < 200) return dcDefaultHalfLife;
   var best = dcDefaultHalfLife, bestLl = double.infinity;
   for (final hl in dcHalfLives) {
-    final ll = _logLoss(d, a, rollingProbs(d, a, b, hl));
+    final ll = _logLoss(d, a, rollingProbs(d, a, b, hl), recentHalf: recentHalf, refSeason: sub.last.season);
     if (ll < bestLl) {
       bestLl = ll;
       best = hl;

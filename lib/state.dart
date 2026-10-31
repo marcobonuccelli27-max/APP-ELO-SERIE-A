@@ -27,6 +27,7 @@ class Settings {
   int calibTo; // ultima stagione usata per calibrare; 0 = l'ultima completa
   String model; // 'elo' oppure 'dc' (Dixon-Coles)
   double marketWeight; // peso delle quote nelle probabilità: 0 = solo modello
+  double recentHalf; // peso delle stagioni recenti in calibrazione (emivita in stagioni, 0 = uguale)
   double dcHalfLife; // emivita manuale per Dixon-Coles, in giorni
   Set<String> excludedBooks;
   bool introSeen; // scheda di benvenuto già vista
@@ -50,6 +51,7 @@ class Settings {
     this.calibTo = 0,
     this.model = 'elo',
     this.marketWeight = 0,
+    this.recentHalf = 5,
     this.dcHalfLife = dcDefaultHalfLife,
     Set<String>? excludedBooks,
   })  : excludedBooks = excludedBooks ?? {'Pinnacle', '1xBet', 'Matchbook'},
@@ -78,6 +80,7 @@ class Settings {
         'calibTo': calibTo,
         'model': model,
         'marketWeight': marketWeight,
+        'recentHalf': recentHalf,
         'dcHalfLife': dcHalfLife,
         'excludedBooks': excludedBooks.toList(),
         'introSeen': introSeen,
@@ -102,6 +105,7 @@ class Settings {
       calibTo: j['calibTo'] as int? ?? 0,
       model: j['model'] as String? ?? 'elo',
       marketWeight: n('marketWeight', 0),
+      recentHalf: n('recentHalf', 5),
       dcHalfLife: n('dcHalfLife', dcDefaultHalfLife),
       excludedBooks: (j['excludedBooks'] as List<dynamic>?)?.map((e) => e as String).toSet(),
       introSeen: j['introSeen'] as bool? ?? false,
@@ -117,6 +121,7 @@ class Recommended {
   static const marketWeight = 0.5;
   static const threshold = 1.05;
   static const stakePct = 2.0;
+  static const recentHalf = 5.0;
   static const nonAdm = ['Pinnacle', '1xBet', 'Matchbook'];
 }
 
@@ -178,8 +183,14 @@ class Prediction {
   final double? xgHome; // gol attesi (solo Dixon-Coles)
   final double? xgAway;
   final Map<String, List<double>> ouBooks;
+  final int? hg; // risultato, se la partita è già stata giocata
+  final int? ag;
+
+  bool get played => hg != null && ag != null;
 
   Prediction({
+    this.hg,
+    this.ag,
     this.model = 'elo',
     this.over25,
     this.gg,
@@ -304,6 +315,16 @@ class TeamRow {
 }
 
 /// Tutto quello che serve alla schermata Classifiche per una stagione.
+/// Una giornata di campionato.
+class RoundInfo {
+  final String label; // "9ª giornata" oppure "Recuperi"
+  final List<Prediction> matches;
+  RoundInfo(this.label, this.matches);
+
+  bool get allPlayed => matches.every((m) => m.played);
+  bool get anyUpcoming => matches.any((m) => !m.played);
+}
+
 /// Attacco e difesa di una squadra secondo Dixon-Coles.
 class DcTeamRow {
   final String name;
@@ -351,6 +372,7 @@ class AppState extends ChangeNotifier {
   EloHistoryData? _eloHistory;
   String? _eloHistoryKey;
   final Map<int, Future<SeasonView>> _views = {};
+  final Map<int, Future<List<RoundInfo>>> _rounds = {};
 
   int get currentSeason => currentSeasonStart(DateTime.now());
 
@@ -372,6 +394,7 @@ class AppState extends ChangeNotifier {
     s.marketWeight = Recommended.marketWeight;
     s.threshold = Recommended.threshold;
     s.stakePct = Recommended.stakePct;
+    s.recentHalf = Recommended.recentHalf;
     s.excludedBooks.addAll(Recommended.nonAdm);
     s.introSeen = true;
     await saveSettings();
@@ -436,6 +459,18 @@ class AppState extends ChangeNotifier {
         'Correggi',
         () {
           s.calibFrom = Recommended.calibFrom;
+          saveSettings();
+        },
+      ));
+    }
+    if (s.recentHalf == 0) {
+      out.add(Advice(
+        'Tutte le stagioni pesano uguale',
+        'Il calcio cambia nel tempo: dare più peso alle stagioni recenti rende la calibrazione più adatta a oggi.',
+        AdviceLevel.tip,
+        'Usa moderato',
+        () {
+          s.recentHalf = Recommended.recentHalf;
           saveSettings();
         },
       ));
@@ -545,7 +580,8 @@ class AppState extends ChangeNotifier {
   }
 
   // "k2": la calibrazione include anche il K variabile a inizio stagione.
-  String _calibKey(int cur) => 'k3-${settings.calibFrom}-${settings.calibToFor(cur)}-$cur';
+  String _calibKey(int cur) =>
+      'k4-${settings.calibFrom}-${settings.calibToFor(cur)}-$cur-${settings.recentHalf.toStringAsFixed(1)}';
 
   EloParams get paramsInUse =>
       settings.autoCalib ? (calibrated ?? EloParams.standard) : settings.manualParams;
@@ -602,6 +638,7 @@ class AppState extends ChangeNotifier {
     _history = h;
     _historyVersion++;
     _views.clear();
+    _rounds.clear();
     final idx = <String, List<MatchResult>>{};
     for (final m in h) {
       (idx['${m.home}|${m.away}'] ??= []).add(m);
@@ -652,6 +689,7 @@ class AppState extends ChangeNotifier {
 
   Future<void> saveSettings() async {
     _views.clear();
+    _rounds.clear();
     notifyListeners();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('settings', jsonEncode(settings.toJson()));
@@ -691,18 +729,18 @@ class AppState extends ChangeNotifier {
 
       if (settings.autoCalib && (calibrated == null || calibratedKey != _calibKey(cur))) {
         _progress('Calibro il modello sulle stagioni scelte…');
-        calibrated = await _calibrateInBackground(history, from, to);
+        calibrated = await _calibrateInBackground(history, from, to, settings.recentHalf);
         calibratedKey = _calibKey(cur);
       }
 
       _progress('Calcolo i punteggi Elo…');
       final params = paramsInUse;
-      final live = await _buildLiveInBackground(history, params, cur, from, to);
+      final live = await _buildLiveInBackground(history, params, cur, from, to, settings.recentHalf);
       DcFit? dcFit;
       if (settings.model == 'dc') {
         if (settings.autoCalib && (calibratedHl == null || calibratedHlKey != _calibKey(cur))) {
           _progress('Calibro Dixon-Coles: può richiedere qualche decina di secondi…');
-          calibratedHl = await _calibrateDcInBackground(history, from, to);
+          calibratedHl = await _calibrateDcInBackground(history, from, to, settings.recentHalf);
           calibratedHlKey = _calibKey(cur);
         }
         _progress('Stimo attacco e difesa delle squadre…');
@@ -760,6 +798,7 @@ class AppState extends ChangeNotifier {
       }
 
       lastUpdate = DateTime.now();
+      _rounds.clear();
       await _saveSnapshot();
     } catch (e) {
       error = e.toString();
@@ -884,6 +923,7 @@ class AppState extends ChangeNotifier {
     final h = await _ensureHistory();
     final args = BacktestArgs(
       marketWeight: marketWeight,
+      recentHalf: settings.recentHalf,
       model: model,
       fixedHalfLife: settings.autoCalib ? null : settings.dcHalfLife,
       testSeasons: seasons,
@@ -895,6 +935,65 @@ class AppState extends ChangeNotifier {
       calibTo: settings.calibToFor(currentSeason),
     );
     return _backtestInBackground(h, args);
+  }
+
+  /// Giornate di una stagione: partite giocate con la previsione di allora,
+  /// più quelle in arrivo per la stagione in corso.
+  Future<List<RoundInfo>> roundsFor(int season) => _rounds.putIfAbsent(season, () => _makeRounds(season));
+
+  Future<List<RoundInfo>> _makeRounds(int season) async {
+    final h = await _ensureHistory();
+    final cur = currentSeason;
+    final args = PastArgs(season, settings.model, paramsInUse, halfLifeInUse, settings.calibFrom,
+        settings.calibToFor(cur), settings.recentHalf);
+    final past = await _pastInBackground(h, args);
+    final all = <Prediction>[
+      for (final m in past)
+        Prediction(
+          home: m.home,
+          away: m.away,
+          date: m.date,
+          eloH: 0,
+          eloA: 0,
+          p: m.p,
+          books: m.odds == null ? {} : {'Quote dell’epoca': m.odds!},
+          unknownTeam: false,
+          model: settings.model,
+          over25: m.over25,
+          gg: m.gg,
+          xgHome: m.xgHome,
+          xgAway: m.xgAway,
+          hg: m.hg,
+          ag: m.ag,
+        ),
+    ];
+    if (season == cur) {
+      for (final p in predictions) {
+        final d = p.date;
+        final dup = all.any((x) =>
+            x.home == p.home && x.away == p.away && (d == null || x.date == null || x.date!.difference(d).inDays.abs() <= 3));
+        if (!dup) all.add(p);
+      }
+    }
+    if (all.isEmpty) return [];
+    final far = DateTime(2100);
+    final groups = groupRounds(
+      [for (final p in all) p.date ?? far],
+      [for (final p in all) p.home],
+      [for (final p in all) p.away],
+    );
+    final out = <RoundInfo>[];
+    var n = 0;
+    for (final g in groups) {
+      final ms = [for (final i in g) all[i]];
+      if (ms.length >= 6) {
+        n++;
+        out.add(RoundInfo('${n}ª giornata', ms));
+      } else {
+        out.add(RoundInfo(n == 0 ? 'Partite isolate' : 'Recuperi dopo la ${n}ª', ms));
+      }
+    }
+    return out;
   }
 
   /// Classifica Elo, classifica Serie A e andamenti di una stagione.
@@ -935,18 +1034,21 @@ class AppState extends ChangeNotifier {
 // I calcoli pesanti girano in un isolate separato, così l'app resta fluida.
 // Sono funzioni di primo livello perché l'isolate riceva solo i dati necessari.
 
-Future<EloParams> _calibrateInBackground(List<MatchResult> h, int from, int to) =>
-    Isolate.run(() => calibrate(h, from: from, to: to));
+Future<EloParams> _calibrateInBackground(List<MatchResult> h, int from, int to, double rh) =>
+    Isolate.run(() => calibrate(h, from: from, to: to, recentHalf: rh));
 
 Future<LiveModel> _buildLiveInBackground(
-        List<MatchResult> h, EloParams p, int cur, int from, int to) =>
-    Isolate.run(() => buildLive(h, p, cur, drawFrom: from, drawTo: to));
+        List<MatchResult> h, EloParams p, int cur, int from, int to, double rh) =>
+    Isolate.run(() => buildLive(h, p, cur, drawFrom: from, drawTo: to, recentHalf: rh));
+
+Future<List<PastMatch>> _pastInBackground(List<MatchResult> h, PastArgs a) =>
+    Isolate.run(() => pastMatches(h, a));
 
 Future<BacktestResult> _backtestInBackground(List<MatchResult> h, BacktestArgs args) =>
     Isolate.run(() => backtest(h, args));
 
-Future<double> _calibrateDcInBackground(List<MatchResult> h, int from, int to) =>
-    Isolate.run(() => calibrateDc(h, from: from, to: to));
+Future<double> _calibrateDcInBackground(List<MatchResult> h, int from, int to, double rh) =>
+    Isolate.run(() => calibrateDc(h, from: from, to: to, recentHalf: rh));
 
 Future<DcFit> _fitDcInBackground(List<MatchResult> h, double hl, int? untilSeason) =>
     Isolate.run(() => fitDcNow(h, hl, untilSeason: untilSeason));

@@ -30,148 +30,255 @@ class GiornataScreen extends StatefulWidget {
 
 class _GiornataScreenState extends State<GiornataScreen> {
   int filter = 0;
+  int? season;
+  int? roundIdx;
 
   @override
   Widget build(BuildContext context) {
     final app = AppScope.of(context);
     final s = app.settings;
-    final evals = app.predictions.map((p) => p.evaluate(s)).toList();
-    final valueCount = evals.where((e) => e?.hasValue ?? false).length;
-    final shown = <int>[
-      for (var i = 0; i < app.predictions.length; i++)
-        if (filter == 0 || (evals[i]?.hasValue ?? false)) i
+    final cur = app.currentSeason;
+    final seasons = {...app.seasonsAvailable, if (app.predictions.isNotEmpty) cur}.toList()..sort((a, b) => b - a);
+    final sel = season != null && seasons.contains(season) ? season! : (seasons.isEmpty ? cur : seasons.first);
+
+    final top = <Widget>[
+      PageHeader(
+        title: 'Giornate',
+        subtitle: app.lastUpdate == null
+            ? 'Serie A · nessun aggiornamento'
+            : 'Serie A · aggiornato ${dateLabel(app.lastUpdate)}',
+      ),
+      if (!s.introSeen) _IntroCard(app: app),
+      if (s.introSeen && app.checkSettings().any((a) => a.level == AdviceLevel.warning))
+        _AdviceBanner(onTap: () => app.goToTab(4)),
+      const SizedBox(height: 18),
+      PrimaryButton(
+        label: app.busy ? 'Aggiorno…' : 'Aggiorna dati',
+        icon: CupertinoIcons.refresh,
+        onPressed: app.busy ? null : app.refresh,
+      ),
+      if (app.busy)
+        Padding(
+          padding: const EdgeInsets.only(top: 14),
+          child: Row(children: [
+            const CupertinoActivityIndicator(),
+            const SizedBox(width: 10),
+            Expanded(child: Text(app.progress, style: const TextStyle(fontSize: 13, color: C.grey))),
+          ]),
+        ),
+      if (app.error != null) Notice(app.error!, tone: Tone.warning),
+      if (app.oddsError != null && sel == cur) Notice(app.oddsError!, tone: Tone.warning),
     ];
+
+    if (seasons.isEmpty || (app.seasonsAvailable.isEmpty && app.predictions.isEmpty)) {
+      return SafeArea(
+        bottom: false,
+        child: ListView(padding: _pagePadding, children: [
+          ...top,
+          if (!app.busy && app.error == null)
+            const Notice(
+              'Al primo avvio scarico circa 20 stagioni di risultati e calibro il modello: '
+              'serve circa un minuto. Poi ogni aggiornamento richiede pochi secondi.',
+              title: 'Premi “Aggiorna dati” per iniziare',
+            ),
+        ]),
+      );
+    }
 
     return SafeArea(
       bottom: false,
       child: ListView(
         padding: _pagePadding,
         children: [
-          PageHeader(
-            title: 'Prossime partite',
-            subtitle: app.lastUpdate == null
-                ? 'Serie A · nessun aggiornamento'
-                : 'Aggiornato ${dateLabel(app.lastUpdate)}',
-          ),
-          if (!s.introSeen) _IntroCard(app: app),
-          if (s.introSeen && app.checkSettings().any((a) => a.level == AdviceLevel.warning))
-            _AdviceBanner(onTap: () => app.goToTab(4)),
+          ...top,
           const SizedBox(height: 18),
-          PrimaryButton(
-            label: app.busy ? 'Aggiorno…' : 'Aggiorna dati',
-            icon: CupertinoIcons.refresh,
-            onPressed: app.busy ? null : app.refresh,
+          FutureBuilder<List<RoundInfo>>(
+            future: app.roundsFor(sel),
+            builder: (ctx, snap) {
+              if (snap.hasError) return Notice(snap.error.toString(), tone: Tone.warning);
+              if (!snap.hasData) {
+                return const Padding(
+                  padding: EdgeInsets.all(30),
+                  child: Center(child: CupertinoActivityIndicator()),
+                );
+              }
+              final rounds = snap.data!;
+              if (rounds.isEmpty) return const Notice('Nessuna partita per questa stagione.');
+              var idx = roundIdx ?? rounds.indexWhere((r) => r.anyUpcoming);
+              if (idx < 0) idx = rounds.length - 1;
+              if (idx >= rounds.length) idx = rounds.length - 1;
+              return _roundBody(app, sel, seasons, rounds, idx);
+            },
           ),
-          if (app.busy)
-            Padding(
-              padding: const EdgeInsets.only(top: 14),
-              child: Row(children: [
-                const CupertinoActivityIndicator(),
-                const SizedBox(width: 10),
-                Expanded(child: Text(app.progress, style: const TextStyle(fontSize: 13, color: C.grey))),
-              ]),
-            ),
-          if (s.provider == 'oddsapi' && app.requestsRemaining != null && !app.busy)
-            _QuotaLine(remaining: app.requestsRemaining!, used: app.requestsUsed, at: app.requestsCheckedAt),
-          if (app.error != null) Notice(app.error!, tone: Tone.warning),
-          if (app.oddsError != null) Notice(app.oddsError!, tone: Tone.warning),
-          if (app.predictions.isEmpty && !app.busy && app.error == null && app.oddsError == null)
-            const Notice(
-              'Al primo avvio scarico circa 20 stagioni di risultati e calibro il modello: '
-              'serve circa un minuto. Poi ogni aggiornamento richiede pochi secondi.',
-              title: 'Premi “Aggiorna dati” per iniziare',
-            ),
-          if (app.predictions.isNotEmpty) ...[
-            const SizedBox(height: 20),
-            Row(children: [
-              Expanded(child: StatCard(label: 'Con valore', value: '$valueCount', sub: 'su ${app.predictions.length}')),
-              const SizedBox(width: 10),
-              Expanded(child: StatCard(label: 'Puntata', value: euro(s.stake), sub: '${fmt(s.stakePct, 0)}% di ${euro(s.budget, 0)}')),
-              const SizedBox(width: 10),
-              Expanded(child: StatCard(label: 'Soglia', value: fmt(s.threshold), sub: 'almeno +${((s.threshold - 1) * 100).round()}%')),
-            ]),
-            const SizedBox(height: 20),
-            SizedBox(
-              width: double.infinity,
-              child: CupertinoSlidingSegmentedControl<int>(
-                groupValue: filter,
-                children: const {
-                  0: Padding(padding: EdgeInsets.symmetric(vertical: 8), child: Text('Tutte')),
-                  1: Padding(padding: EdgeInsets.symmetric(vertical: 8), child: Text('Solo con valore')),
-                },
-                onValueChanged: (v) => setState(() => filter = v ?? 0),
-              ),
-            ),
-            const SizedBox(height: 14),
-            for (final i in shown)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 12),
-                child: MatchCard(pred: app.predictions[i], eval: evals[i], settings: s),
-              ),
-            if (shown.isEmpty) const Notice('Nessuna partita supera la soglia di valore per ora.'),
-            const Padding(
-              padding: EdgeInsets.only(top: 6),
-              child: Text(
-                'Valore = probabilità del modello × quota. Sopra la soglia la giocata viene segnalata; '
-                'sotto, secondo il modello la quota non ripaga il rischio. Tocca una partita per i dettagli.',
-                style: TextStyle(fontSize: 12, height: 1.45, color: C.grey),
-              ),
-            ),
-          ],
         ],
       ),
     );
   }
-}
 
-/// Richieste rimaste nel piano gratuito di The Odds API.
-class _QuotaLine extends StatelessWidget {
-  final int remaining;
-  final int? used;
-  final DateTime? at;
-  const _QuotaLine({required this.remaining, required this.used, required this.at});
+  Widget _roundBody(AppState app, int sel, List<int> seasons, List<RoundInfo> rounds, int idx) {
+    final s = app.settings;
+    final round = rounds[idx];
+    final preds = round.matches.toList()
+      ..sort((a, b) => (a.date ?? DateTime(2100)).compareTo(b.date ?? DateTime(2100)));
+    final evals = preds.map((p) => p.evaluate(s)).toList();
+    final shown = <int>[
+      for (var i = 0; i < preds.length; i++)
+        if (filter == 0 || (evals[i]?.hasValue ?? false)) i
+    ];
+    final dates = preds.map((p) => p.date).whereType<DateTime>().toList();
+    final range = dates.isEmpty
+        ? ''
+        : '${dates.first.day}/${dates.first.month} – ${dates.last.day}/${dates.last.month}';
 
-  @override
-  Widget build(BuildContext context) {
-    final total = used == null ? null : remaining + used!;
-    final low = remaining <= 20;
-    final frac = total == null || total == 0 ? null : (remaining / total).clamp(0.0, 1.0).toDouble();
-    final when = at == null ? '' : ' · controllato ${dateLabel(at)}';
-    return Container(
-      margin: const EdgeInsets.only(top: 14),
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-      decoration: BoxDecoration(color: low ? C.warnTint : C.fill, borderRadius: BorderRadius.circular(14)),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
+    // Riepilogo delle giocate consigliate.
+    var rec = 0, recPlayed = 0, recWon = 0;
+    var profit = 0.0;
+    for (var i = 0; i < preds.length; i++) {
+      final e = evals[i];
+      if (e == null || !e.hasValue) continue;
+      rec++;
+      final p = preds[i];
+      if (!p.played) continue;
+      recPlayed++;
+      final out = p.hg! > p.ag! ? 0 : (p.hg == p.ag ? 1 : 2);
+      final odds = p.best(s.excludedBooks)!.odds[e.pick];
+      if (out == e.pick) {
+        recWon++;
+        profit += s.stake * (odds - 1);
+      } else {
+        profit -= s.stake;
+      }
+    }
+
+    final playedNote = round.matches.any((m) => m.played)
+        ? 'Per le partite giocate vedi la previsione che il modello avrebbe fatto prima della partita, '
+            'con le quote di allora (Bet365 o media), e com’è andata la giocata consigliata. '
+        : '';
+
+    Widget arrow(IconData icon, int? to) => CupertinoButton(
+          padding: const EdgeInsets.all(8),
+          onPressed: to == null ? null : () => setState(() => roundIdx = to),
+          child: Icon(icon, size: 22),
+        );
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Container(
+        decoration: BoxDecoration(color: C.fill, borderRadius: BorderRadius.circular(14)),
+        child: Row(children: [
+          arrow(CupertinoIcons.chevron_left, idx > 0 ? idx - 1 : null),
           Expanded(
-            child: Text(
-              total == null
-                  ? 'The Odds API: restano $remaining richieste questo mese'
-                  : 'The Odds API: restano $remaining richieste su $total',
-              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: low ? C.warn : C.ink),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(10),
+              onTap: () async {
+                final picked = await showModalBottomSheet<int>(
+                  context: context,
+                  backgroundColor: C.white,
+                  showDragHandle: true,
+                  isScrollControlled: true,
+                  builder: (ctx) => SafeArea(
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.7),
+                      child: ListView(shrinkWrap: true, children: [
+                        for (var i = rounds.length - 1; i >= 0; i--)
+                          ListTile(
+                            title: Text(rounds[i].label),
+                            subtitle: Text(rounds[i].allPlayed ? 'Giocata' : 'Da giocare'),
+                            trailing: i == idx ? const Icon(CupertinoIcons.checkmark_alt, color: C.blue) : null,
+                            onTap: () => Navigator.pop(ctx, i),
+                          ),
+                      ]),
+                    ),
+                  ),
+                );
+                if (picked != null) setState(() => roundIdx = picked);
+              },
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 10),
+                child: Column(children: [
+                  Text(round.label, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: C.ink)),
+                  const SizedBox(height: 2),
+                  Text('${round.allPlayed ? 'Giocata' : (round.anyUpcoming && round.matches.any((m) => m.played) ? 'In corso' : 'Da giocare')}'
+                      '${range.isEmpty ? '' : ' · $range'}',
+                      style: const TextStyle(fontSize: 12, color: C.grey)),
+                ]),
+              ),
             ),
           ),
+          arrow(CupertinoIcons.chevron_right, idx < rounds.length - 1 ? idx + 1 : null),
         ]),
-        if (frac != null) ...[
-          const SizedBox(height: 8),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(3),
-            child: LinearProgressIndicator(
-              value: frac,
-              minHeight: 6,
-              backgroundColor: C.fill2,
-              color: low ? C.warn : C.blue,
-            ),
-          ),
-        ],
-        const SizedBox(height: 6),
-        Text(
-          '${low ? 'Stanno per finire: ' : ''}ogni “Aggiorna dati” ne usa una. '
-          'Il conteggio riparte all’inizio di ogni mese$when.',
-          style: const TextStyle(fontSize: 12, height: 1.4, color: C.grey),
+      ),
+      const SizedBox(height: 8),
+      Row(children: [
+        Text('Stagione ${seasonLabel(sel)}', style: const TextStyle(fontSize: 13, color: C.grey)),
+        const Spacer(),
+        CupertinoButton(
+          padding: EdgeInsets.zero,
+          minSize: 28,
+          onPressed: () async {
+            final p = await pickSeason(context, seasons, sel);
+            if (p != null) {
+              setState(() {
+                season = p;
+                roundIdx = null;
+              });
+            }
+          },
+          child: const Text('Cambia stagione', style: TextStyle(fontSize: 14)),
         ),
       ]),
-    );
+      const SizedBox(height: 12),
+      if (round.allPlayed)
+        Row(children: [
+          Expanded(child: StatCard(label: 'Consigliate', value: '$rec', sub: 'su ${preds.length} partite')),
+          const SizedBox(width: 10),
+          Expanded(child: StatCard(label: 'Vinte', value: '$recWon', sub: rec == 0 ? 'nessuna giocata' : 'su $recPlayed')),
+          const SizedBox(width: 10),
+          Expanded(
+            child: StatCard(
+              label: 'Risultato',
+              value: rec == 0 ? '—' : signedEuro(profit),
+              valueColor: profit < 0 ? C.warn : C.blueText,
+              sub: 'puntata ${euro(s.stake)}',
+            ),
+          ),
+        ])
+      else
+        Row(children: [
+          Expanded(child: StatCard(label: 'Con valore', value: '$rec', sub: 'su ${preds.length}')),
+          const SizedBox(width: 10),
+          Expanded(child: StatCard(label: 'Puntata', value: euro(s.stake), sub: '${fmt(s.stakePct, 0)}% di ${euro(s.budget, 0)}')),
+          const SizedBox(width: 10),
+          Expanded(child: StatCard(label: 'Soglia', value: fmt(s.threshold), sub: 'almeno +${((s.threshold - 1) * 100).round()}%')),
+        ]),
+      const SizedBox(height: 16),
+      SizedBox(
+        width: double.infinity,
+        child: CupertinoSlidingSegmentedControl<int>(
+          groupValue: filter,
+          children: const {
+            0: Padding(padding: EdgeInsets.symmetric(vertical: 8), child: Text('Tutte')),
+            1: Padding(padding: EdgeInsets.symmetric(vertical: 8), child: Text('Solo con valore')),
+          },
+          onValueChanged: (v) => setState(() => filter = v ?? 0),
+        ),
+      ),
+      const SizedBox(height: 14),
+      for (final i in shown)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 12),
+          child: MatchCard(pred: preds[i], eval: evals[i], settings: s),
+        ),
+      if (shown.isEmpty) const Notice('Nessuna partita supera la soglia di valore in questa giornata.'),
+      Padding(
+        padding: const EdgeInsets.only(top: 6),
+        child: Text(
+          '$playedNote'
+          'Valore = probabilità × quota. Le giornate sono ricostruite dalle date delle partite; i risultati arrivano da '
+          'football-data, che li aggiorna un paio di volte a settimana. Tocca una partita per i dettagli.',
+          style: const TextStyle(fontSize: 12, height: 1.45, color: C.grey),
+        ),
+      ),
+    ]);
   }
 }
 
@@ -309,6 +416,7 @@ class MatchCard extends StatelessWidget {
     final best = pred.best(settings.excludedBooks);
     final e = eval;
     final shown = e?.used ?? pred.p;
+    final actual = pred.played ? (pred.hg! > pred.ag! ? 0 : (pred.hg == pred.ag ? 1 : 2)) : -1;
     return Material(
       color: C.fill,
       borderRadius: BorderRadius.circular(16),
@@ -325,13 +433,24 @@ class MatchCard extends StatelessWidget {
                   child: Text('${pred.home} – ${pred.away}',
                       style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: C.ink)),
                 ),
-                Text(dateLabel(pred.date), style: const TextStyle(fontSize: 12, color: C.grey)),
+                if (pred.played)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(color: C.ink, borderRadius: BorderRadius.circular(8)),
+                    child: Text('${pred.hg} – ${pred.ag}',
+                        style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: C.white)),
+                  )
+                else
+                  Text(dateLabel(pred.date), style: const TextStyle(fontSize: 12, color: C.grey)),
               ]),
               const SizedBox(height: 3),
               Text(
-                pred.xgHome != null
-                    ? 'Dixon-Coles · gol attesi ${fmt(pred.xgHome!, 1)} – ${fmt(pred.xgAway!, 1)}'
-                    : 'Elo ${pred.eloH.round()} contro ${pred.eloA.round()}',
+                pred.played
+                    ? '${dateLabel(pred.date)} · previsione fatta prima della partita'
+                        '${pred.xgHome != null ? ', gol attesi ${fmt(pred.xgHome!, 1)} – ${fmt(pred.xgAway!, 1)}' : ''}'
+                    : pred.xgHome != null
+                        ? 'Dixon-Coles · gol attesi ${fmt(pred.xgHome!, 1)} – ${fmt(pred.xgAway!, 1)}'
+                        : 'Elo ${pred.eloH.round()} contro ${pred.eloA.round()}',
                 style: const TextStyle(fontSize: 12, color: C.grey),
               ),
               if (settings.marketWeight > 0 && e != null)
@@ -358,6 +477,7 @@ class MatchCard extends StatelessWidget {
                       prob: shown[k],
                       odds: best?.odds[k],
                       highlighted: e != null && e.hasValue && e.pick == k,
+                      happened: pred.played && actual == k,
                     ),
                   ),
                 ],
@@ -371,8 +491,14 @@ class MatchCard extends StatelessWidget {
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
                   decoration: BoxDecoration(color: C.blueTint, borderRadius: BorderRadius.circular(14)),
                   child: Text(
-                    'Gioca ${outcomeLabels[e.pick]} · valore ${fmt(e.ev)} · ${euro(settings.stake)}',
-                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: C.blueText),
+                    pred.played
+                        ? 'Consigliata ${outcomeLabels[e.pick]} · valore ${fmt(e.ev)} · '
+                            '${actual == e.pick ? 'vinta ${signedEuro(settings.stake * (best!.odds[e.pick] - 1))}' : 'persa ${signedEuro(-settings.stake)}'}'
+                        : 'Gioca ${outcomeLabels[e.pick]} · valore ${fmt(e.ev)} · ${euro(settings.stake)}',
+                    style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: pred.played && actual != e.pick ? C.warn : C.blueText),
                   ),
                 ),
                 const SizedBox(height: 6),
@@ -581,7 +707,9 @@ class _OutcomeCell extends StatelessWidget {
   final double prob;
   final double? odds;
   final bool highlighted;
-  const _OutcomeCell({required this.label, required this.prob, required this.odds, required this.highlighted});
+  final bool happened; // esito uscito davvero
+  const _OutcomeCell(
+      {required this.label, required this.prob, required this.odds, required this.highlighted, this.happened = false});
 
   @override
   Widget build(BuildContext context) {
@@ -590,13 +718,21 @@ class _OutcomeCell extends StatelessWidget {
       decoration: BoxDecoration(
         color: highlighted ? C.blueTint : C.white,
         borderRadius: BorderRadius.circular(10),
-        border: highlighted ? Border.all(color: C.blue, width: 1.2) : null,
+        border: highlighted
+            ? Border.all(color: C.blue, width: 1.2)
+            : (happened ? Border.all(color: C.ink, width: 1.2) : null),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(label,
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: highlighted ? C.blueText : C.grey)),
+          Row(children: [
+            Text(label,
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: highlighted ? C.blueText : C.grey)),
+            if (happened) ...[
+              const Spacer(),
+              const Icon(CupertinoIcons.checkmark_alt, size: 13, color: C.ink),
+            ],
+          ]),
           const SizedBox(height: 2),
           Text(pct(prob), style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600, color: C.ink)),
           Text(odds == null ? 'quota —' : 'quota ${fmt(odds!)}',
@@ -1987,6 +2123,27 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
                   if (picked != 0 && s.calibFrom > picked) s.calibFrom = picked;
                   save();
                 },
+              ),
+              SettingRow(
+                label: 'Peso delle stagioni recenti',
+                sub: switch (s.recentHalf.round()) {
+                  0 => 'Tutte le stagioni contano uguale',
+                  3 => 'Forte: una stagione di 3 anni fa conta la metà dell’ultima',
+                  _ => 'Moderato: una stagione di 5 anni fa conta la metà dell’ultima · consigliato',
+                },
+                trailing: CupertinoSlidingSegmentedControl<int>(
+                  groupValue: const [0, 3, 5].contains(s.recentHalf.round()) ? s.recentHalf.round() : null,
+                  backgroundColor: C.fill2,
+                  children: const {
+                    0: Padding(padding: EdgeInsets.symmetric(horizontal: 6, vertical: 6), child: Text('Uguale')),
+                    5: Padding(padding: EdgeInsets.symmetric(horizontal: 6, vertical: 6), child: Text('Moderato')),
+                    3: Padding(padding: EdgeInsets.symmetric(horizontal: 6, vertical: 6), child: Text('Forte')),
+                  },
+                  onValueChanged: (v) {
+                    s.recentHalf = (v ?? 5).toDouble();
+                    save();
+                  },
+                ),
               ),
               if (!s.autoCalib) ...[
                 SettingRow(

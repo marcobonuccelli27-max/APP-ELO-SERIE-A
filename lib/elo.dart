@@ -170,6 +170,8 @@ _SimOut _simulate(
   EloParams p, {
   int lossFrom = 0,
   int lossTo = 1 << 30,
+  double recentHalf = 0, // emivita in stagioni del peso delle stagioni recenti; 0 = tutte uguali
+  int refSeason = 0, // stagione di riferimento per il peso (l'ultima di calibrazione)
   List<List<int>>? recI,
   List<List<double>>? rec,
 }) {
@@ -184,7 +186,12 @@ _SimOut _simulate(
   final first = cur;
   var baseline = 1500.0;
   var loss = 0.0;
+  var wsum = 0.0;
   var count = 0;
+  var sw = 1.0; // peso della stagione in corso
+  double seasonWeight(int season) =>
+      recentHalf > 0 ? math.pow(0.5, (refSeason - season) / recentHalf).toDouble() : 1.0;
+  sw = seasonWeight(cur);
 
   double bottom3() {
     final rs = <double>[];
@@ -208,6 +215,7 @@ _SimOut _simulate(
         played[t] = 0;
       }
       cur = d.season[i];
+      sw = seasonWeight(cur);
     }
     final h = d.h[i], a = d.a[i];
     for (final t in [h, a]) {
@@ -226,7 +234,8 @@ _SimOut _simulate(
     final o = d.outc[i];
     final w = o == 0 ? 1.0 : (o == 1 ? 0.5 : 0.0);
     if (cur != first && cur >= lossFrom && cur <= lossTo) {
-      loss += (w - we) * (w - we);
+      loss += sw * (w - we) * (w - we);
+      wsum += sw;
       count++;
     }
     final kEff = p.early == 0 ? p.k : p.kAt((played[h] + played[a]) / 2);
@@ -249,15 +258,16 @@ _SimOut _simulate(
   for (var t = 0; t < nt; t++) {
     if (inCur[t]) lastTeams.add(t);
   }
-  return _SimOut(diffs, r, last, count > 0 ? loss / count : 1, count, bottom3(), lastTeams);
+  return _SimOut(diffs, r, last, wsum > 0 ? loss / wsum : 1, count, bottom3(), lastTeams);
 }
 
 /// Cerca i parametri che avrebbero previsto meglio le partite delle stagioni
 /// da [from] a [to] (gli anni sono quelli di inizio stagione).
-EloParams calibrate(List<MatchResult> ms, {int from = 0, int to = 1 << 30}) {
+EloParams calibrate(List<MatchResult> ms, {int from = 0, int to = 1 << 30, double recentHalf = 0}) {
   final sub = ms.where((m) => m.season <= to).toList();
   if (sub.isEmpty) return EloParams.standard;
   final d = _Prepared(sub);
+  final ref = sub.last.season;
   if (_simulate(d, EloParams.standard, lossFrom: from, lossTo: to).lossCount < 300) {
     return EloParams.standard;
   }
@@ -265,7 +275,7 @@ EloParams calibrate(List<MatchResult> ms, {int from = 0, int to = 1 << 30}) {
   var bestLoss = double.infinity;
 
   void tryP(EloParams p) {
-    final l = _simulate(d, p, lossFrom: from, lossTo: to).loss;
+    final l = _simulate(d, p, lossFrom: from, lossTo: to, recentHalf: recentHalf, refSeason: ref).loss;
     if (l < bestLoss) {
       bestLoss = l;
       best = p;
@@ -300,53 +310,65 @@ EloParams calibrate(List<MatchResult> ms, {int from = 0, int to = 1 << 30}) {
 }
 
 /// Stima il modello 1X2 dalle differenze Elo e dai risultati reali.
-DrawModel fitDrawModel(List<double> diffs, List<int> outc) {
+DrawModel fitDrawModel(List<double> diffs, List<int> outc, [List<double>? weights]) {
   final n = diffs.length;
   if (n < 200) return DrawModel.standard;
+  var wTot = 0.0;
+  for (var i = 0; i < n; i++) {
+    wTot += weights == null ? 1 : weights[i];
+  }
   var t1 = -1.0, t2 = 0.2, b = 0.5;
   const lr = 1.0;
   for (var it = 0; it < 1500; it++) {
     var g1 = 0.0, g2 = 0.0, gb = 0.0;
     for (var i = 0; i < n; i++) {
       final d = diffs[i] / 100.0;
+      final wi = weights == null ? 1.0 : weights[i];
       final s1 = _sig(t1 - b * d);
       final s2 = _sig(t2 - b * d);
       switch (outc[i]) {
         case 2:
-          g1 += 1 - s1;
-          gb += -d * (1 - s1);
+          g1 += wi * (1 - s1);
+          gb += wi * -d * (1 - s1);
           break;
         case 0:
-          g2 += -s2;
-          gb += d * s2;
+          g2 += wi * -s2;
+          gb += wi * d * s2;
           break;
         default:
           final pr = math.max(s2 - s1, 1e-9);
           final q1 = s1 * (1 - s1), q2 = s2 * (1 - s2);
-          g1 += -q1 / pr;
-          g2 += q2 / pr;
-          gb += -d * (q2 - q1) / pr;
+          g1 += wi * -q1 / pr;
+          g2 += wi * q2 / pr;
+          gb += wi * -d * (q2 - q1) / pr;
       }
     }
-    t1 += lr * g1 / n;
-    t2 += lr * g2 / n;
-    b += lr * gb / n;
+    t1 += lr * g1 / wTot;
+    t2 += lr * g2 / wTot;
+    b += lr * gb / wTot;
     if (t2 < t1 + 0.05) t2 = t1 + 0.05;
   }
   return DrawModel(t1, t2, b);
 }
 
-DrawModel _fitDrawOn(_Prepared d, _SimOut sim, int from, int to) {
+DrawModel _fitDrawOn(_Prepared d, _SimOut sim, int from, int to, {double recentHalf = 0}) {
   final first = d.n > 0 ? d.season[0] : 0;
   final dl = <double>[];
   final ol = <int>[];
+  final wl = <double>[];
+  var ref = 0;
+  for (var i = 0; i < d.n; i++) {
+    final s = d.season[i];
+    if (s >= from && s <= to && s > ref) ref = s;
+  }
   for (var i = 0; i < d.n; i++) {
     final s = d.season[i];
     if (s == first || s < from || s > to) continue;
     dl.add(sim.diffs[i]);
     ol.add(d.outc[i]);
+    wl.add(recentHalf > 0 ? math.pow(0.5, (ref - s) / recentHalf).toDouble() : 1.0);
   }
-  return fitDrawModel(dl, ol);
+  return fitDrawModel(dl, ol, wl);
 }
 
 /// Il modello pronto per la stagione in corso.
@@ -367,10 +389,10 @@ class LiveModel {
 }
 
 LiveModel buildLive(List<MatchResult> ms, EloParams p, int currentSeason,
-    {int drawFrom = 0, int drawTo = 1 << 30}) {
+    {int drawFrom = 0, int drawTo = 1 << 30, double recentHalf = 0}) {
   final d = _Prepared(ms);
   final sim = _simulate(d, p);
-  final draw = _fitDrawOn(d, sim, drawFrom, drawTo);
+  final draw = _fitDrawOn(d, sim, drawFrom, drawTo, recentHalf: recentHalf);
 
   final ratings = <String, double>{};
   for (var t = 0; t < d.teams.length; t++) {
@@ -504,9 +526,11 @@ class BacktestArgs {
   final String model; // 'elo' oppure 'dc'
   final double? fixedHalfLife; // emivita manuale per Dixon-Coles
   final double marketWeight; // peso del mercato nelle probabilità (0 = solo modello)
+  final double recentHalf; // peso delle stagioni recenti nella calibrazione
 
   const BacktestArgs({
     this.marketWeight = 0,
+    this.recentHalf = 0,
     this.model = 'elo',
     this.fixedHalfLife,
     required this.testSeasons,
@@ -647,14 +671,14 @@ BacktestResult backtest(List<MatchResult> ms, BacktestArgs args) {
   }
   late final List<List<double>> testProbs;
   if (isDc) {
-    halfLife = args.fixedHalfLife ?? calibrateDc(ms, from: trainFrom, to: trainTo);
+    halfLife = args.fixedHalfLife ?? calibrateDc(ms, from: trainFrom, to: trainTo, recentHalf: args.recentHalf);
     final dd = DcData(upto);
     testProbs = rollingProbs(dd, testStart, dd.n, halfLife).map((x) => x.p).toList();
   } else {
-    params = args.fixed ?? calibrate(ms, from: trainFrom, to: trainTo);
+    params = args.fixed ?? calibrate(ms, from: trainFrom, to: trainTo, recentHalf: args.recentHalf);
     final d = _Prepared(upto);
     final sim = _simulate(d, params);
-    final draw = _fitDrawOn(d, sim, trainFrom, trainTo);
+    final draw = _fitDrawOn(d, sim, trainFrom, trainTo, recentHalf: args.recentHalf);
     testProbs = [for (var i = testStart; i < d.n; i++) draw.probs(sim.diffs[i])];
   }
 
@@ -828,4 +852,80 @@ class ThresholdRow {
 
   double get clvShare => clvChecked == 0 ? 0 : clvBeaten / clvChecked;
   double get lowerBound => roi - margin; // caso sfavorevole: ROI meno il margine
+}
+
+
+// ---------------------------------------------------------------------------
+// Partite già giocate di una stagione, con la previsione fatta prima di ognuna
+
+class PastMatch {
+  final String home, away;
+  final DateTime date;
+  final int hg, ag;
+  final List<double> p; // probabilità 1X2 prima della partita
+  final double? over25, gg, xgHome, xgAway; // solo Dixon-Coles
+  final List<double>? odds; // quote dell'epoca (Bet365 o media)
+  final List<double>? closing;
+  PastMatch(this.home, this.away, this.date, this.hg, this.ag, this.p, this.over25, this.gg, this.xgHome,
+      this.xgAway, this.odds, this.closing);
+}
+
+class PastArgs {
+  final int season;
+  final String model;
+  final EloParams params;
+  final double halfLife;
+  final int drawFrom, drawTo;
+  final double recentHalf;
+  const PastArgs(this.season, this.model, this.params, this.halfLife, this.drawFrom, this.drawTo, this.recentHalf);
+}
+
+List<PastMatch> pastMatches(List<MatchResult> ms, PastArgs a) {
+  final upto = ms.where((m) => m.season <= a.season).toList();
+  var from = 0;
+  while (from < upto.length && upto[from].season < a.season) {
+    from++;
+  }
+  if (from >= upto.length) return [];
+  final out = <PastMatch>[];
+  if (a.model == 'dc') {
+    final dd = DcData(upto);
+    final probs = rollingProbs(dd, from, dd.n, a.halfLife);
+    for (var i = from; i < upto.length; i++) {
+      final m = upto[i], q = probs[i - from];
+      out.add(PastMatch(m.home, m.away, m.date, m.hg, m.ag, q.p, q.over25, q.gg, q.lambda, q.mu, m.odds, m.closing));
+    }
+  } else {
+    final d = _Prepared(upto);
+    final sim = _simulate(d, a.params);
+    final draw = _fitDrawOn(d, sim, a.drawFrom, a.drawTo, recentHalf: a.recentHalf);
+    for (var i = from; i < upto.length; i++) {
+      final m = upto[i];
+      out.add(PastMatch(m.home, m.away, m.date, m.hg, m.ag, draw.probs(sim.diffs[i]), null, null, null, null,
+          m.odds, m.closing));
+    }
+  }
+  return out;
+}
+
+/// Raggruppa partite ordinate per data in giornate: partite ravvicinate,
+/// senza squadre ripetute e al massimo 10 per giornata.
+List<List<int>> groupRounds(List<DateTime> dates, List<String> homes, List<String> aways) {
+  final order = List<int>.generate(dates.length, (i) => i)..sort((x, y) => dates[x].compareTo(dates[y]));
+  final groups = <List<int>>[];
+  var teams = <String>{};
+  DateTime? last;
+  for (final i in order) {
+    final gap = last == null ? 0 : dates[i].difference(last).inHours;
+    final clash = teams.contains(homes[i]) || teams.contains(aways[i]);
+    if (groups.isEmpty || gap > 36 || clash || groups.last.length >= 10) {
+      groups.add([]);
+      teams = {};
+    }
+    groups.last.add(i);
+    teams.add(homes[i]);
+    teams.add(aways[i]);
+    last = dates[i];
+  }
+  return groups;
 }
